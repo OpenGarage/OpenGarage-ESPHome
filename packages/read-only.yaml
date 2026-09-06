@@ -1,0 +1,84 @@
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.8.2
+  project:
+    name: opengarage.esphome
+    version: 0.1.3-dev-m1
+  platformio_options:
+    board_build.ldscript: eagle.flash.4m1m.ld
+
+esp8266:
+  board: d1_mini
+  board_flash_mode: dio
+  early_pin_init: false
+  restore_from_flash: false
+  framework:
+    version: 3.1.2
+    platform_version: 4.2.1
+
+external_components:
+  - source:
+      type: local
+      # Entrypoint YAML lives in firmware/ or tests/, both one level below root.
+      path: ../components
+    components: [opengarage]
+
+logger:
+  baud_rate: 115200
+  hardware_uart: UART0
+  level: INFO
+
+opengarage:
+  id: garage
+  hardware: ${hardware}
+  state_source: distance
+  mounting: ceiling
+  contact_type: none
+  distance_enabled: true
+  status_led_enabled: false
+  door_threshold: 50
+  vehicle_threshold: 150
+  filter: consensus  # Tightest five of the latest seven samples.
+  timeout_policy: ignore
+  consensus_margin: 10
+  sample_interval: 500ms
+  stale_timeout: 10s
+  distance:
+    name: Distance
+  echo_timeouts:
+    name: Echo Timeouts
+  door_open:
+    name: Door Open
+  vehicle_present:
+    name: Vehicle Present
+  onboard_button:
+    name: Onboard Button
+  distance_fault:
+    name: Distance Sensor Fault
+  security_plus_capable:
+    name: Security+ Capable Hardware
+  door_state:
+    name: Door State
+  vehicle_state:
+    name: Vehicle State
+  hardware_family:
+    name: Hardware Family
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 60s
+  - platform: debug
+    free:
+      name: Free Heap
+    block:
+      name: Largest Free Heap Block
+    loop_time:
+      name: Maximum Loop Time
+
+debug:
+  update_interval: 60s

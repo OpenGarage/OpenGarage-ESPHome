@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+#include "state_resolver.h"
+#include <cstdint>
+
+namespace esphome::opengarage {
+
+// The initial M2 bench surface is toggle + cancel, not guessed open/close/stop.
+class ControlOutputs {
+ public:
+  virtual ~ControlOutputs() = default;
+  virtual void warning_start(uint32_t minimum_ms) = 0;
+  virtual bool warning_tick(uint32_t elapsed_ms) = 0;
+  virtual void warning_stop() = 0;
+  virtual bool pulse(uint32_t duration_ms) = 0;
+  virtual bool pulse_active() const = 0;
+  virtual void stop() = 0;
+};
+
+enum class ActionPhase : uint8_t { DISARMED, IDLE, WARNING, PULSING, LOCKOUT };
+enum class DoorCommand : uint8_t { TOGGLE, OPEN, CLOSE };
+enum class ActionReason : uint8_t {
+  NONE, DISARMED, ARMED, WARNING, DISPATCHED, BUSY, LOCKOUT, UNKNOWN_STATE,
+  HARDWARE_MISMATCH, LINK_DOWN, CANCELED, STATE_CHANGED, LOOP_STALL, EXPIRED,
+  SHUTDOWN, OUTPUT_FAILURE, CONFIG_INVALID, READY, ALREADY_AT_TARGET, UNSUPPORTED
+};
+
+inline const char *action_phase_name(ActionPhase phase) {
+  switch (phase) {
+    case ActionPhase::IDLE: return "Armed idle";
+    case ActionPhase::WARNING: return "Buzzer warning";
+    case ActionPhase::PULSING: return "Pulsing";
+    case ActionPhase::LOCKOUT: return "Lockout";
+    default: return "Disarmed";
+  }
+}
+inline const char *action_reason_name(ActionReason reason) {
+  switch (reason) {
+    case ActionReason::NONE: return "None";
+    case ActionReason::ARMED: return "Locally armed";
+    case ActionReason::WARNING: return "Warning started";
+    case ActionReason::DISPATCHED: return "Pulse dispatched";
+    case ActionReason::BUSY: return "Busy; not queued";
+    case ActionReason::LOCKOUT: return "Command lockout";
+    case ActionReason::UNKNOWN_STATE: return "Required state unknown";
+    case ActionReason::HARDWARE_MISMATCH: return "Bench identity or hardware mismatch";
+    case ActionReason::LINK_DOWN: return "Wi-Fi disconnected";
+    case ActionReason::CANCELED: return "Canceled; no pending pulse";
+    case ActionReason::STATE_CHANGED: return "Observed door state changed";
+    case ActionReason::LOOP_STALL: return "Control loop stalled; disarmed";
+    case ActionReason::EXPIRED: return "Arming session expired";
+    case ActionReason::SHUTDOWN: return "OTA or shutdown; disarmed";
+    case ActionReason::OUTPUT_FAILURE: return "Output failure; disarmed";
+    case ActionReason::CONFIG_INVALID: return "Invalid timing configuration";
+    case ActionReason::READY: return "Controls ready";
+    case ActionReason::ALREADY_AT_TARGET: return "Already at requested state; no pulse";
+    case ActionReason::UNSUPPORTED: return "Unsupported cover command; no pulse";
+    default: return "Controls disarmed";
+  }
+}
+
+struct ActionConfig {
+  uint32_t warning_ms{5000};
+  uint32_t pulse_ms{1000};  // Stock default, deliberately capped at 1 s for this bench slice.
+  uint32_t lockout_ms{30000};
+  bool bench_mode{true};
+};
+
+class ActionController {
+ public:
+  static constexpr uint32_t MAX_SERVICE_GAP_MS = 500;
+  static constexpr uint32_t ARM_SESSION_MS = 300000;
+  explicit ActionController(ControlOutputs &outputs) : outputs_(outputs) {}
+  bool configure(ActionConfig config) {
+    config_valid_ = config.warning_ms >= 5000 && config.warning_ms <= 30000 &&
+                    config.pulse_ms >= 100 && config.pulse_ms <= 1000 &&
+                    config.lockout_ms >= 5000 && config.lockout_ms <= 120000;
+    if (config_valid_) config_ = config;
+    disarm(config_valid_ ? ActionReason::DISARMED : ActionReason::CONFIG_INVALID);
+    return config_valid_;
+  }
+  void initialize(uint32_t now) {
+    outputs_.stop();
+    armed_ = cooldown_ = inputs_seen_ = false;
+    stopped_ = manually_disabled_ = false;
+    phase_ = ActionPhase::DISARMED;
+    last_service_ = now;
+    reason_ = config_valid_ ? ActionReason::DISARMED : ActionReason::CONFIG_INVALID;
+  }
+  void update(uint32_t now, DoorState state, bool hardware_ok, bool link_ok) {
+    const uint32_t gap = uint32_t(now - last_service_);
+    state_ = state;
+    hardware_ok_ = hardware_ok;
+    link_ok_ = link_ok;
+    last_service_ = now;
+    inputs_seen_ = true;
+    if (cooldown_ && uint32_t(now - dispatched_at_) >= config_.lockout_ms) cooldown_ = false;
+    if (stopped_) return;
+    if (!config_.bench_mode && config_valid_ && !manually_disabled_ && !armed_ &&
+        hardware_ok_ && link_ok_ && known_()) {
+      armed_ = true;
+      phase_ = cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+      if (reason_ == ActionReason::DISARMED) reason_ = ActionReason::READY;
+    }
+    if (pending() && gap > MAX_SERVICE_GAP_MS) { disarm(ActionReason::LOOP_STALL); return; }
+    if (config_.bench_mode && armed_ && uint32_t(now - armed_at_) >= ARM_SESSION_MS) { disarm(ActionReason::EXPIRED); return; }
+    if (armed_ && !hardware_ok_) { disarm(ActionReason::HARDWARE_MISMATCH); return; }
+    if (armed_ && !link_ok_) { disarm(ActionReason::LINK_DOWN); return; }
+    if (armed_ && !known_()) { disarm(ActionReason::UNKNOWN_STATE); return; }
+    if (phase_ == ActionPhase::WARNING) {
+      if (state_ != warning_state_) { cancel(now, ActionReason::STATE_CHANGED); return; }
+      const auto elapsed = uint32_t(now - warning_at_);
+      const bool warning_complete = outputs_.warning_tick(elapsed);
+      if (elapsed < config_.warning_ms || !warning_complete) return;
+      outputs_.warning_stop();
+      if (!outputs_.pulse(config_.pulse_ms)) { disarm(ActionReason::OUTPUT_FAILURE); return; }
+      ++dispatches_;
+      dispatched_at_ = now;
+      cooldown_ = true;
+      phase_ = ActionPhase::PULSING;
+      reason_ = ActionReason::DISPATCHED;
+    } else if (phase_ == ActionPhase::PULSING) {
+      if (!outputs_.pulse_active()) phase_ = cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+      else if (uint32_t(now - dispatched_at_) > config_.pulse_ms + MAX_SERVICE_GAP_MS)
+        disarm(ActionReason::OUTPUT_FAILURE);
+    } else if (phase_ == ActionPhase::LOCKOUT && !cooldown_) {
+      phase_ = ActionPhase::IDLE;
+    }
+  }
+  bool arm_locally(uint32_t now) {
+    if (stopped_) return reject_(ActionReason::SHUTDOWN);
+    if (!config_valid_) return reject_(ActionReason::CONFIG_INVALID);
+    if (!inputs_seen_ || uint32_t(now - last_service_) > MAX_SERVICE_GAP_MS)
+      return reject_(ActionReason::LOOP_STALL);
+    if (!hardware_ok_) return reject_(ActionReason::HARDWARE_MISMATCH);
+    if (!link_ok_) return reject_(ActionReason::LINK_DOWN);
+    if (!known_()) return reject_(ActionReason::UNKNOWN_STATE);
+    if (cooldown_) return reject_(ActionReason::LOCKOUT);
+    if (pending()) return reject_(ActionReason::BUSY);
+    armed_ = true;
+    armed_at_ = now;
+    manually_disabled_ = false;
+    phase_ = ActionPhase::IDLE;
+    reason_ = ActionReason::ARMED;
+    return true;
+  }
+  bool request_toggle(uint32_t now) { return request(now, DoorCommand::TOGGLE); }
+  bool request(uint32_t now, DoorCommand command) {
+    if (!armed_ || stopped_) return reject_(ActionReason::DISARMED);
+    if (pending()) return reject_(ActionReason::BUSY);
+    if (cooldown_) return reject_(ActionReason::LOCKOUT);
+    if (!inputs_seen_ || uint32_t(now - last_service_) > MAX_SERVICE_GAP_MS) {
+      disarm(ActionReason::LOOP_STALL); return false;
+    }
+    if (config_.bench_mode && uint32_t(now - armed_at_) >= ARM_SESSION_MS) { disarm(ActionReason::EXPIRED); return false; }
+    if (!hardware_ok_ || !link_ok_ || !known_()) {
+      disarm(!hardware_ok_ ? ActionReason::HARDWARE_MISMATCH : !link_ok_ ? ActionReason::LINK_DOWN : ActionReason::UNKNOWN_STATE);
+      return false;
+    }
+    if ((command == DoorCommand::OPEN && state_ == DoorState::OPEN) ||
+        (command == DoorCommand::CLOSE && state_ == DoorState::CLOSED))
+      return reject_(ActionReason::ALREADY_AT_TARGET);
+    warning_state_ = state_;
+    warning_at_ = now;
+    phase_ = ActionPhase::WARNING;
+    reason_ = ActionReason::WARNING;
+    outputs_.warning_start(config_.warning_ms);
+    return true;
+  }
+  void cancel(uint32_t, ActionReason reason = ActionReason::CANCELED) {
+    outputs_.stop();  // Cut a contact pulse short if necessary; not a physical door Stop command.
+    phase_ = !armed_ ? ActionPhase::DISARMED : cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+    reason_ = reason;
+  }
+  void disarm(ActionReason reason = ActionReason::DISARMED) {
+    if (!config_.bench_mode && reason == ActionReason::DISARMED) manually_disabled_ = true;
+    outputs_.stop();
+    armed_ = false;
+    phase_ = ActionPhase::DISARMED;
+    reason_ = reason;  // Deliberately retain cooldown across disarm/rearm attempts.
+  }
+  void shutdown() { disarm(ActionReason::SHUTDOWN); stopped_ = true; }
+  void reject_unsupported() { reason_ = ActionReason::UNSUPPORTED; }
+  bool armed() const { return armed_; }
+  bool pending() const { return phase_ == ActionPhase::WARNING || phase_ == ActionPhase::PULSING; }
+  ActionPhase phase() const { return phase_; }
+  ActionReason reason() const { return reason_; }
+  uint32_t dispatches() const { return dispatches_; }
+
+ protected:
+  bool known_() const { return state_ == DoorState::CLOSED || state_ == DoorState::OPEN; }
+  bool reject_(ActionReason reason) { reason_ = reason; return false; }
+  ControlOutputs &outputs_;
+  ActionConfig config_;
+  DoorState state_{DoorState::UNKNOWN}, warning_state_{DoorState::UNKNOWN};
+  ActionPhase phase_{ActionPhase::DISARMED};
+  ActionReason reason_{ActionReason::DISARMED};
+  uint32_t last_service_{0}, warning_at_{0}, dispatched_at_{0}, armed_at_{0}, dispatches_{0};
+  bool armed_{false}, cooldown_{false}, inputs_seen_{false}, hardware_ok_{false}, link_ok_{false};
+  bool config_valid_{true}, stopped_{false}, manually_disabled_{false};
+};
+
+// Owns the complete physical gesture. A press canceling a warning is consumed
+// through release, including a long hold; it can never become a second request.
+class ControlButton {
+ public:
+  void update(uint32_t now, bool pressed, ActionController &controller) {
+    if (!initialized_) {
+      initialized_ = true; raw_ = stable_ = pressed; changed_at_ = now;
+      consumed_ = pressed;  // Button held during boot must first be released.
+      return;
+    }
+    if (pressed && controller.pending()) {
+      controller.cancel(now);
+      consumed_ = true;  // Immediate raw-level cancellation has precedence over a due dispatch.
+    }
+    if (pressed != raw_) { raw_ = pressed; changed_at_ = now; }
+    if (raw_ == stable_ || uint32_t(now - changed_at_) < 50) return;
+    stable_ = raw_;
+    if (stable_) { pressed_at_ = changed_at_; return; }
+    if (consumed_) { consumed_ = false; return; }
+    if (uint32_t(changed_at_ - pressed_at_) >= 3000) {
+      if (controller.armed()) controller.disarm();
+      else controller.arm_locally(now);
+    } else if (controller.armed()) {
+      controller.request_toggle(now);
+    }
+  }
+ protected:
+  uint32_t changed_at_{0}, pressed_at_{0};
+  bool initialized_{false}, raw_{false}, stable_{false}, consumed_{false};
+};
+
+}  // namespace esphome::opengarage
