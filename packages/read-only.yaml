@@ -22,7 +22,7 @@ external_components:
       type: local
       # Entrypoint YAML lives in firmware/ or tests/, both one level below root.
       path: ../components
-    components: [opengarage]
+    components: [opengarage, opengarage_secplus_codec]
 
 logger:
   baud_rate: 115200

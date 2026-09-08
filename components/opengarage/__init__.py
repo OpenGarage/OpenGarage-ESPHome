@@ -4,16 +4,20 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import pins
-from esphome.components import binary_sensor, sensor, text_sensor, button, cover, ota
+from esphome.components import binary_sensor, sensor, text_sensor, button, cover, light, ota
 from esphome.components.esp8266.const import require_waveform
 from esphome.const import CONF_ID
 
 def AUTO_LOAD(config):
     components = ["sensor", "binary_sensor", "text_sensor"]
-    if "dev_pulse_control" in config or "pulse_control" in config:
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
         components.append("button")
-    if "pulse_control" in config:
+    if "pulse_control" in config or "secplus1_control" in config:
         components += ["cover", "web_server_base"]
+    if "secplus1_control" in config:
+        components.append("light")
+    if "dev_secplus2_rx" in config:
+        components.append("opengarage_secplus_codec")
     return components
 DEPENDENCIES = ["esp8266"]
 MULTI_CONF = False
@@ -22,13 +26,15 @@ ns = cg.esphome_ns.namespace("opengarage")
 OpenGarageComponent = ns.class_("OpenGarageComponent", cg.Component)
 ControlCommandButton = ns.class_("ControlCommandButton", button.Button)
 PulseCover = ns.class_("PulseCover", cover.Cover)
+Secplus1Cover = ns.class_("Secplus1Cover", cover.Cover)
+Secplus1Light = ns.class_("Secplus1Light", light.LightOutput)
 UpdateModeButton = ns.class_("UpdateModeButton", button.Button)
 StateSource = ns.enum("StateSource", is_class=True)
 Mounting = ns.enum("Mounting", is_class=True)
 ContactType = ns.enum("ContactType", is_class=True)
 FilterMode = ns.enum("FilterMode", is_class=True)
 TimeoutPolicy = ns.enum("TimeoutPolicy", is_class=True)
-SOURCES = {name.lower(): getattr(StateSource, name) for name in ("DISTANCE", "CONTACT", "BOTH_AND", "EITHER_OR")}
+SOURCES = {name.lower(): getattr(StateSource, name) for name in ("DISTANCE", "CONTACT", "BOTH_AND", "EITHER_OR", "PROTOCOL")}
 MOUNTINGS = {name.lower(): getattr(Mounting, name) for name in ("CEILING", "SIDE")}
 CONTACTS = {name.lower(): getattr(ContactType, name) for name in ("NONE", "NORMALLY_CLOSED", "NORMALLY_OPEN")}
 FILTERS = {name.lower(): getattr(FilterMode, name) for name in ("CONSENSUS", "MEDIAN")}
@@ -61,9 +67,34 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
-    if source != "contact" and not value["distance_enabled"]:
+    if "secplus1_control" in value:
+        if "dev_secplus1" not in value or value["dev_secplus1"]["mode"] != "emulate_if_needed":
+            raise cv.Invalid("Security+ 1.0 controls require dev_secplus1 with explicit emulate_if_needed TX ownership")
+        if any(key in value for key in ("dev_pulse_control", "pulse_control", "dev_secplus2_rx")):
+            raise cv.Invalid("Security+ 1.0 controls cannot share pins with another backend")
+    if source == "protocol" and not any(key in value for key in ("dev_secplus2_rx", "dev_secplus1")):
+        raise cv.Invalid("state_source: protocol requires dev_secplus2_rx or dev_secplus1")
+    if "dev_secplus1" in value:
+        if value["hardware"] != "v2_3":
+            raise cv.Invalid("Security+ 1.0 prototype requires v2_3 hardware")
+        if any(key in value for key in ("dev_secplus2_rx", "pulse_control", "dev_pulse_control")):
+            raise cv.Invalid("Security+ 1.0 prototype cannot share pins with another backend")
+        if source != "protocol" or "door_state" not in value:
+            raise cv.Invalid("Security+ 1.0 prototype requires protocol state_source and door_state text")
+        if value["dev_secplus1"]["mode"] == "passive" and "tx_pin" in value["dev_secplus1"]:
+            raise cv.Invalid("Passive Security+ 1.0 must not configure a TX pin")
+    if "dev_secplus2_rx" in value:
+        if value["hardware"] != "v2_3":
+            raise cv.Invalid("Security+ receive-only prototype requires v2_3 hardware")
+        if "pulse_control" in value or "dev_pulse_control" in value:
+            raise cv.Invalid("Security+ receive-only prototype cannot be combined with pulse control")
+        if source != "protocol":
+            raise cv.Invalid("Security+ receive-only prototype requires state_source: protocol")
+        if "door_state" not in value:
+            raise cv.Invalid("Security+ receive-only prototype requires door_state text")
+    if source not in ("contact", "protocol") and not value["distance_enabled"]:
         raise cv.Invalid("This state_source requires distance_enabled: true")
-    if source != "distance" and value["contact_type"] == "none":
+    if source not in ("distance", "protocol") and value["contact_type"] == "none":
         raise cv.Invalid("This state_source requires a contact_type")
     if not value["distance_enabled"] and ("trigger_pin" in value or "echo_pin" in value):
         raise cv.Invalid("Do not configure distance pins when distance is disabled")
@@ -120,6 +151,75 @@ PULSE_MVP_SCHEMA = cv.Schema({
 })
 
 
+SECPLUS2_COUNTERS = ("rx_bytes", "valid_frames", "status_frames", "decode_errors", "partial_timeouts",
+                    "rx_overflows", "ignored_commands", "invalid_status", "rx_high_water", "max_service_time")
+SECPLUS2_RX_SCHEMA = cv.Schema({
+    cv.Optional("rx_pin", default=5): _fixed_pin(5, "input"),
+    cv.Optional("status_timeout", default="360s"): _milliseconds(1000, 600000),
+    cv.Required("status_valid"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("light_state"): binary_sensor.binary_sensor_schema(),
+    cv.Optional("lock_state"): binary_sensor.binary_sensor_schema(),
+    **{cv.Optional(key): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic",
+          state_class="measurement" if key in ("rx_high_water", "max_service_time") else "total_increasing",
+          **({"unit_of_measurement": "µs"} if key == "max_service_time" else {})) for key in SECPLUS2_COUNTERS},
+})
+
+def _secplus1_pins(value):
+    value = cv.Schema({}, extra=cv.ALLOW_EXTRA)(value).copy()
+    if str(value.get("mode", "passive")).lower() == "emulate_if_needed":
+        value.setdefault("tx_pin", {"number": 15, "mode": "output"})
+    return value
+
+
+# deferred_isr is retained for 0.4.3 entity/YAML compatibility; always zero from 0.4.4.
+SECPLUS1_COUNTERS = ("rx_bytes", "frames", "door_frames", "light_lock_frames", "parity_errors",
+                    "partial_timeouts", "rx_overflows", "ignored_bytes", "invalid_frames", "panel37_commands",
+                    "tx_bytes", "tx_deferred", "tx_errors", "max_service_time", "rx_high_water",
+                    "deferred_backlog", "deferred_partial", "deferred_byte", "deferred_isr", "deferred_high")
+SECPLUS1_SCHEMA = cv.All(_secplus1_pins, cv.Schema({
+    cv.Optional("mode", default="passive"): cv.one_of("passive", "emulate_if_needed", lower=True),
+    cv.Optional("rx_pin", default=5): _fixed_pin(5, "input"),
+    cv.Optional("tx_pin"): _fixed_pin(15, "output"),
+    cv.Optional("status_timeout", default="10s"): _milliseconds(1000, 600000),
+    cv.Required("status_valid"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
+    cv.Required("panel_state"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("last_frame"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("raw_trace"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("tx_block_reason"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("rx_pin_high"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("light_state"): binary_sensor.binary_sensor_schema(),
+    cv.Optional("lock_state"): binary_sensor.binary_sensor_schema(),
+    **{cv.Optional(key): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic",
+          state_class="measurement" if key in ("rx_high_water", "max_service_time") else "total_increasing",
+          **({"unit_of_measurement": "µs"} if key == "max_service_time" else {})) for key in SECPLUS1_COUNTERS},
+}))
+
+
+def _light_options(value):
+    if str(value.get("restore_mode", "ALWAYS_OFF")).upper() != "ALWAYS_OFF" or value.get("effects"):
+        raise cv.Invalid("Opener light requires ALWAYS_OFF bookkeeping and no effects; never restore an opener command")
+    return value
+
+
+SECPLUS1_CONTROL_SCHEMA = cv.Schema({
+    cv.Required("cover"): cover.cover_schema(Secplus1Cover, device_class="garage"),
+    cv.Required("light"): cv.All(_light_options, light.light_schema(
+        Secplus1Light, light.LightType.BINARY, default_restore_mode="ALWAYS_OFF")),
+    cv.Required("state_valid"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
+    cv.Required("firmware_update_mode"): button.button_schema(UpdateModeButton, entity_category="config"),
+    cv.Optional("warning_time", default="5s"): _milliseconds(5000, 30000),
+    cv.Optional("lockout_time", default="30s"): _milliseconds(5000, 120000),
+    cv.Optional("buzzer_pin", default=13): _fixed_pin(13, "output"),
+    cv.Required("request_toggle"): button.button_schema(ControlCommandButton),
+    cv.Required("cancel"): button.button_schema(ControlCommandButton),
+    cv.Required("controls_armed"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
+    cv.Required("control_phase"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("last_action_reason"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("command_count"): sensor.sensor_schema(accuracy_decimals=0, state_class="total_increasing", entity_category="diagnostic"),
+    cv.Required("light_action_reason"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("light_command_count"): sensor.sensor_schema(accuracy_decimals=0, state_class="total_increasing", entity_category="diagnostic"),
+})
+
 CONFIG_SCHEMA = cv.All(
     cv.only_on(["esp8266"]), _add_pins,
     cv.Schema({
@@ -127,6 +227,9 @@ CONFIG_SCHEMA = cv.All(
         cv.Required("hardware"): cv.one_of("v2_0_v2_2", "v2_3", lower=True),
         cv.Optional("dev_pulse_control"): PULSE_BENCH_SCHEMA,
         cv.Optional("pulse_control"): PULSE_MVP_SCHEMA,
+        cv.Optional("dev_secplus2_rx"): SECPLUS2_RX_SCHEMA,
+        cv.Optional("dev_secplus1"): SECPLUS1_SCHEMA,
+        cv.Optional("secplus1_control"): SECPLUS1_CONTROL_SCHEMA,
         cv.Optional("state_source", default="distance"): cv.enum(SOURCES, lower=True),
         cv.Optional("mounting", default="ceiling"): cv.enum(MOUNTINGS, lower=True),
         cv.Optional("contact_type", default="none"): cv.enum(CONTACTS, lower=True),
@@ -162,6 +265,8 @@ CONFIG_SCHEMA = cv.All(
 
 def _final_validate(config):
     full = fv.full_config.get()
+    if "dev_secplus1" in config and not full.get("ota"):
+        raise cv.Invalid("Security+ 1.0 status profile requires OTA lifecycle support")
     esp = full["esp8266"]
     if esp["board"] != "d1_mini" or esp["board_flash_mode"] != "dio" or esp["early_pin_init"]:
         raise cv.Invalid("OpenGarage M1 requires d1_mini, board_flash_mode: dio, early_pin_init: false")
@@ -172,7 +277,7 @@ def _final_validate(config):
         raise cv.Invalid("PlatformIO must not override DIO flash mode")
     if full.get("logger", {}).get("hardware_uart", "UART0") != "UART0":
         raise cv.Invalid("OpenGarage logger must use UART0; swapped UART0 and UART1 use reserved pins")
-    if "dev_pulse_control" in config or "pulse_control" in config:
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
         if not full.get("api", {}).get("encryption"):
             raise cv.Invalid("M2 bench control requires encrypted native API")
         if not full.get("wifi") or not full.get("ota"):
@@ -183,7 +288,7 @@ def _final_validate(config):
             raise cv.Invalid("M2 bench control requires authenticated native OTA")
         if full.get("web_server") and not full["web_server"].get("auth"):
             raise cv.Invalid("M2 bench control requires authenticated web_server")
-        if "pulse_control" in config:
+        if "pulse_control" in config or "secplus1_control" in config:
             if not full.get("web_server", {}).get("auth"):
                 raise cv.Invalid("Pulse MVP requires authenticated web_server for guarded browser recovery")
             if not any(item["platform"] == "web_server" for item in full["ota"]):
@@ -209,12 +314,51 @@ async def to_code(config):
     cg.add_library("Ticker", None)  # Bundled with the pinned ESP8266 Arduino core.
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    if "dev_pulse_control" in config or "pulse_control" in config:
+    if "dev_secplus1" in config:
+        dev = config["dev_secplus1"]
+        cg.add_define("USE_OPENGARAGE_SECPLUS1")
+        if dev["mode"] == "emulate_if_needed":
+            cg.add_define("USE_OPENGARAGE_SECPLUS1_EMULATION")
+            cg.add(var.set_secplus1_tx_pin(await cg.gpio_pin_expression(dev["tx_pin"])))
+        cg.add_library("EspSoftwareSerial", None)
+        ota.request_ota_state_listeners()
+        cg.add(var.set_secplus1_rx_pin(await cg.gpio_pin_expression(dev["rx_pin"])))
+        cg.add(var.set_secplus1_timeout(dev["status_timeout"].total_milliseconds))
+        cg.add(var.set_secplus1_panel_text(await text_sensor.new_text_sensor(dev["panel_state"])))
+        if "last_frame" in dev:
+            cg.add(var.set_secplus1_frame_text(await text_sensor.new_text_sensor(dev["last_frame"])))
+        if "raw_trace" in dev:
+            cg.add(var.set_secplus1_trace_text(await text_sensor.new_text_sensor(dev["raw_trace"])))
+        if "tx_block_reason" in dev:
+            cg.add(var.set_secplus1_block_text(await text_sensor.new_text_sensor(dev["tx_block_reason"])))
+        if "rx_pin_high" in dev:
+            cg.add(var.set_secplus1_rx_level(await binary_sensor.new_binary_sensor(dev["rx_pin_high"])))
+        for index, key in enumerate(("status_valid", "light_state", "lock_state")):
+            if key in dev:
+                cg.add(var.set_secplus1_binary(index, await binary_sensor.new_binary_sensor(dev[key])))
+        for index, key in enumerate(SECPLUS1_COUNTERS):
+            if key in dev:
+                cg.add(var.set_secplus1_diagnostic(index, await sensor.new_sensor(dev[key])))
+    if "dev_secplus2_rx" in config:
+        dev = config["dev_secplus2_rx"]
+        cg.add_define("USE_OPENGARAGE_SECPLUS2_RX")
+        cg.add_library("EspSoftwareSerial", None)  # 8.0.1 bundled with pinned Arduino 3.1.2.
+        cg.add(var.set_secplus2_rx_pin(await cg.gpio_pin_expression(dev["rx_pin"])))
+        cg.add(var.set_secplus2_timeout(dev["status_timeout"].total_milliseconds))
+        for index, key in enumerate(("status_valid", "light_state", "lock_state")):
+            if key in dev:
+                cg.add(var.set_secplus2_binary(index, await binary_sensor.new_binary_sensor(dev[key])))
+        for index, key in enumerate(SECPLUS2_COUNTERS):
+            if key in dev:
+                cg.add(var.set_secplus2_diagnostic(index, await sensor.new_sensor(dev[key])))
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
         bench = "dev_pulse_control" in config
-        dev = config["dev_pulse_control"] if bench else config["pulse_control"]
+        sec1_control = "secplus1_control" in config
+        dev = config["dev_pulse_control"] if bench else config["secplus1_control" if sec1_control else "pulse_control"]
         require_waveform()  # Arduino tone() must not resolve to ESPHome's no-op waveform stubs.
         cg.add_define("USE_OPENGARAGE_CONTROL")
-        cg.add_define("USE_OPENGARAGE_M2_BENCH" if bench else "USE_OPENGARAGE_PULSE_MVP")
+        cg.add_define("USE_OPENGARAGE_M2_BENCH" if bench else
+                      "USE_OPENGARAGE_SECPLUS1_CONTROL" if sec1_control else "USE_OPENGARAGE_PULSE_MVP")
         ota.request_ota_state_listeners()
         cg.add(var.set_bench_mode(bench))
         if bench:
@@ -223,10 +367,21 @@ async def to_code(config):
             cg.add(var.set_cover(await cover.new_cover(dev["cover"], var)))
             cg.add(var.set_state_valid_sensor(await binary_sensor.new_binary_sensor(dev["state_valid"])))
             await button.new_button(dev["firmware_update_mode"], var)
-        cg.add(var.set_control_pins(await cg.gpio_pin_expression(dev["door_pin"]),
-                                    await cg.gpio_pin_expression(dev["buzzer_pin"])))
-        cg.add(var.set_control_timing(*(dev[key].total_milliseconds for key in
-                                      ("warning_time", "pulse_time", "lockout_time"))))
+        if sec1_control:
+            cg.add(var.set_control_pins(cg.nullptr, await cg.gpio_pin_expression(dev["buzzer_pin"])))
+            cg.add(var.set_control_timing(dev["warning_time"].total_milliseconds, 1000,
+                                         dev["lockout_time"].total_milliseconds))
+            output = cg.new_Pvariable(dev["light"]["output_id"], var)
+            await light.register_light(output, dev["light"])
+            cg.add(var.set_light(output))
+            cg.add(var.set_light_reason(await text_sensor.new_text_sensor(dev["light_action_reason"])))
+            cg.add(var.set_light_count(await sensor.new_sensor(dev["light_command_count"])))
+            cg.add(var.set_pulse_count_sensor(await sensor.new_sensor(dev["command_count"])))
+        else:
+            cg.add(var.set_control_pins(await cg.gpio_pin_expression(dev["door_pin"]),
+                                        await cg.gpio_pin_expression(dev["buzzer_pin"])))
+            cg.add(var.set_control_timing(*(dev[key].total_milliseconds for key in
+                                          ("warning_time", "pulse_time", "lockout_time"))))
         for key, cancel in (("request_toggle", False), ("cancel", True)):
             await button.new_button(dev[key], var, cancel)
         if "controls_armed" in dev:

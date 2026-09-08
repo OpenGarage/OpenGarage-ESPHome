@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "esphome/core/defines.h"
-#ifdef USE_OPENGARAGE_PULSE_MVP
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
 #include "action_controller.h"
 #include "esphome/components/cover/cover.h"
 
