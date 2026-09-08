@@ -11,6 +11,9 @@ class Secplus1Cover : public PulseCover {
  public:
   explicit Secplus1Cover(CoverCommands *parent) : PulseCover(parent) {}
   void observe(DoorState state) {
+    // Nothing observed yet to retain. Native API subscription can still expose
+    // Cover's default Open position; this guard does not provide HA unknown state.
+    if (!published_ && state == DoorState::UNKNOWN) return;
     const auto operation = state == DoorState::OPENING ? cover::COVER_OPERATION_OPENING :
         state == DoorState::CLOSING ? cover::COVER_OPERATION_CLOSING : cover::COVER_OPERATION_IDLE;
     const float next = state == DoorState::CLOSED ? cover::COVER_CLOSED :
