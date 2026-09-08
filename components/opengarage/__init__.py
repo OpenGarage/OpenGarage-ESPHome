@@ -67,6 +67,11 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
+    if "dev_secplus2_sync" in value:
+        if "dev_secplus2_rx" not in value:
+            raise cv.Invalid("Security+ 2.0 queries require dev_secplus2_rx")
+        if not 10000 <= value["dev_secplus2_rx"]["status_timeout"].total_milliseconds <= 60000:
+            raise cv.Invalid("Active Security+ 2.0 queries require status_timeout between 10s and 60s")
     if "secplus1_control" in value:
         if "dev_secplus1" not in value or value["dev_secplus1"]["mode"] != "emulate_if_needed":
             raise cv.Invalid("Security+ 1.0 controls require dev_secplus1 with explicit emulate_if_needed TX ownership")
@@ -164,6 +169,19 @@ SECPLUS2_RX_SCHEMA = cv.Schema({
           **({"unit_of_measurement": "µs"} if key == "max_service_time" else {})) for key in SECPLUS2_COUNTERS},
 })
 
+SECPLUS2_TX_COUNTERS = ("query_writes", "collisions", "deferrals", "tx_errors", "max_tx_time")
+SECPLUS2_SYNC_SCHEMA = cv.Schema({
+    cv.Optional("tx_pin", default=15): _fixed_pin(15, "output"),
+    cv.Required("client_id"): cv.All(cv.hex_uint32_t, cv.Range(min=1, max=0xFFFFFFFF)),
+    cv.Required("rolling_code_strategy"): cv.one_of("stock_zero_on_boot", lower=True),
+    cv.Required("sync_state"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("rolling_code"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("openings"): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic"),
+    **{cv.Optional(key): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic",
+          state_class="measurement" if key == "max_tx_time" else "total_increasing",
+          **({"unit_of_measurement": "µs"} if key == "max_tx_time" else {})) for key in SECPLUS2_TX_COUNTERS},
+})
+
 def _secplus1_pins(value):
     value = cv.Schema({}, extra=cv.ALLOW_EXTRA)(value).copy()
     if str(value.get("mode", "passive")).lower() == "emulate_if_needed":
@@ -228,6 +246,7 @@ CONFIG_SCHEMA = cv.All(
         cv.Optional("dev_pulse_control"): PULSE_BENCH_SCHEMA,
         cv.Optional("pulse_control"): PULSE_MVP_SCHEMA,
         cv.Optional("dev_secplus2_rx"): SECPLUS2_RX_SCHEMA,
+        cv.Optional("dev_secplus2_sync"): SECPLUS2_SYNC_SCHEMA,
         cv.Optional("dev_secplus1"): SECPLUS1_SCHEMA,
         cv.Optional("secplus1_control"): SECPLUS1_CONTROL_SCHEMA,
         cv.Optional("state_source", default="distance"): cv.enum(SOURCES, lower=True),
@@ -267,6 +286,16 @@ def _final_validate(config):
     full = fv.full_config.get()
     if "dev_secplus1" in config and not full.get("ota"):
         raise cv.Invalid("Security+ 1.0 status profile requires OTA lifecycle support")
+    if "dev_secplus2_sync" in config:
+        if not full.get("ota") or any(item["platform"] not in ("esphome", "web_server") for item in full["ota"]):
+            raise cv.Invalid("Security+ 2.0 queries require audited OTA lifecycle support")
+        if not full.get("api", {}).get("encryption"):
+            raise cv.Invalid("Security+ 2.0 query prototype requires encrypted native API")
+        if any(item["platform"] == "esphome" and not item.get("password") for item in full["ota"]):
+            raise cv.Invalid("Security+ 2.0 query prototype requires authenticated native OTA")
+        has_web_ota = any(item["platform"] == "web_server" for item in full["ota"])
+        if (full.get("web_server") or has_web_ota) and not full.get("web_server", {}).get("auth"):
+            raise cv.Invalid("Security+ 2.0 query prototype requires authenticated web_server")
     esp = full["esp8266"]
     if esp["board"] != "d1_mini" or esp["board_flash_mode"] != "dio" or esp["early_pin_init"]:
         raise cv.Invalid("OpenGarage M1 requires d1_mini, board_flash_mode: dio, early_pin_init: false")
@@ -351,6 +380,18 @@ async def to_code(config):
         for index, key in enumerate(SECPLUS2_COUNTERS):
             if key in dev:
                 cg.add(var.set_secplus2_diagnostic(index, await sensor.new_sensor(dev[key])))
+    if "dev_secplus2_sync" in config:
+        dev = config["dev_secplus2_sync"]
+        cg.add_define("USE_OPENGARAGE_SECPLUS2_SYNC")
+        ota.request_ota_state_listeners()
+        cg.add(var.set_secplus2_query_config(await cg.gpio_pin_expression(dev["tx_pin"]), dev["client_id"]))
+        cg.add(var.set_secplus2_sync_text(await text_sensor.new_text_sensor(dev["sync_state"])))
+        cg.add(var.set_secplus2_rolling_text(await text_sensor.new_text_sensor(dev["rolling_code"])))
+        if "openings" in dev:
+            cg.add(var.set_secplus2_openings(await sensor.new_sensor(dev["openings"])))
+        for index, key in enumerate(SECPLUS2_TX_COUNTERS):
+            if key in dev:
+                cg.add(var.set_secplus2_tx_diagnostic(index, await sensor.new_sensor(dev[key])))
     if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
         bench = "dev_pulse_control" in config
         sec1_control = "secplus1_control" in config

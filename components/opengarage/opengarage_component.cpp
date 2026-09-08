@@ -34,7 +34,7 @@ void OpenGarageComponent::setup() {
   button_candidate_ = button_pin_->digital_read();
   if (contact_pin_) contact_candidate_ = contact_pin_->digital_read();
   button_changed_ms_ = contact_changed_ms_ = millis();
-#if defined(USE_OPENGARAGE_SECPLUS1) && !defined(USE_OPENGARAGE_CONTROL)
+#if (defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)) && !defined(USE_OPENGARAGE_CONTROL)
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #endif
 #ifdef USE_OPENGARAGE_CONTROL
@@ -65,6 +65,9 @@ void OpenGarageComponent::setup() {
   publish_text(family_text_, "v2.3 Security+ 1.0 status prototype");
   ESP_LOGW(TAG, "Security+ 1.0 status only; no door control; panel polling %s",
            secplus1_tx_pin_ ? "explicitly enabled if needed" : "disabled");
+#elif defined(USE_OPENGARAGE_SECPLUS2_SYNC)
+  publish_text(family_text_, "v2.3 Security+ 2.0 query prototype");
+  ESP_LOGW(TAG, "Security+ 2.0 queries only; experimental zero-on-boot counter; no motion controls");
 #elif defined(USE_OPENGARAGE_SECPLUS2_RX)
   publish_text(family_text_, "v2.3 Security+ 2.0 RX prototype");
   ESP_LOGW(TAG, "Security+ 2.0 passive receive prototype: no TX, queries, control or panel emulation");
@@ -114,7 +117,11 @@ void OpenGarageComponent::loop() {
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS2_RX
       if (hardware_v23_ && capability && secplus2_rx_pin_ != nullptr) {
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+        if (!secplus2_stopped_) secplus2_.start_queries(secplus2_rx_pin_, secplus2_tx_pin_, secplus2_client_, now);
+#else
         secplus2_.start(secplus2_rx_pin_->get_pin());
+#endif
       } else {
         ESP_LOGW(TAG, "Security+ RX hardware mismatch: receiver not initialized");
       }
@@ -196,6 +203,24 @@ void OpenGarageComponent::publish_(uint32_t now) {
   }
 #endif
   const auto state = resolve_state(config_, distance, contact, protocol_state);
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  const auto &session = secplus2_.session();
+  publish_text(secplus2_sync_text_, session.state_name());
+  char counter[11]; std::snprintf(counter, sizeof(counter), "%lu", static_cast<unsigned long>(session.rolling()));
+  publish_text(secplus2_rolling_text_, counter); // Exact uint32 text, never float-authoritative storage.
+  if (secplus2_openings_) {
+    const auto openings = secplus2_.receiver().openings();
+    const float value = openings ? float(*openings) : NAN;
+    if (!secplus2_openings_->has_state() || (std::isnan(secplus2_openings_->state) != std::isnan(value)) ||
+        (!std::isnan(value) && secplus2_openings_->state != value)) secplus2_openings_->publish_state(value);
+  }
+  const uint32_t tx_values[] = {secplus2_.query_writes(), secplus2_.collisions(), secplus2_.deferrals(),
+                              secplus2_.tx_errors(), secplus2_.max_tx_us()};
+  for (size_t i = 0; i < secplus2_tx_diagnostics_.size(); ++i) {
+    auto *s = secplus2_tx_diagnostics_[i];
+    if (s && (!s->has_state() || s->state != tx_values[i])) s->publish_state(tx_values[i]);
+  }
+#endif
   if (distance_sensor_) distance_sensor_->publish_state(distance ? float(*distance) : NAN);
   if (timeout_sensor_) timeout_sensor_->publish_state(float(distance_.timeout_count()));
   publish_binary(health_sensor_, config_.distance_enabled ? std::optional<bool>(!distance.has_value()) : std::nullopt);
@@ -223,6 +248,9 @@ void OpenGarageComponent::on_shutdown() {
   secplus1_.stop();
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS2_RX
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  secplus2_stopped_ = true;
+#endif
   secplus2_.stop();
 #endif
 #ifdef USE_OPENGARAGE_CONTROL
@@ -325,6 +353,13 @@ void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota
   secplus1_stopped_ = true;
   secplus1_.stop();
 #endif
+}
+#endif
+
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota::OTAComponent *) {
+  secplus2_stopped_ = true;
+  secplus2_.stop(); // Includes OTA before identification, failure, and completed uploads.
 }
 #endif
 

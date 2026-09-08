@@ -54,6 +54,16 @@ class Secplus2Receiver {
     used_ = 0;  // A valid payload may itself contain the prefix; never split it early.
     increment_(stats_.frames);
     const uint16_t command = ((fixed >> 24) & 0xF00U) | (data & 0xFFU);
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+    if (own_client_ && uint32_t(fixed) == own_client_) {
+      increment_(stats_.unknown_commands); return; // Never treat our wire echo as a response.
+    }
+    if (command == 0x48C) {
+      openings_ = uint16_t(((data >> 8) & 0xFF00U) | ((data >> 24) & 0xFFU));
+      increment_(openings_frames_);
+      return;
+    }
+#endif
     if (command != 0x081) { increment_(stats_.unknown_commands); return; }
     const auto door = decode_door_((data >> 8) & 0x0F);
     if (door == DoorState::UNKNOWN) {
@@ -80,6 +90,12 @@ class Secplus2Receiver {
   std::optional<bool> locked() const { return lock_; }
   const Secplus2RxStats &stats() const { return stats_; }
   size_t partial_size() const { return used_; }
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  void set_own_client(uint32_t client) { own_client_ = client; }
+  uint32_t last_byte_ms() const { return last_byte_ms_; }
+  std::optional<uint16_t> openings() const { return openings_; }
+  uint32_t openings_frames() const { return openings_frames_; }
+#endif
 
  protected:
   static void increment_(uint32_t &value) { if (value != UINT32_MAX) ++value; }
@@ -120,6 +136,10 @@ class Secplus2Receiver {
   DoorState door_{DoorState::UNKNOWN};
   std::optional<bool> light_, lock_;
   Secplus2RxStats stats_;
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  uint32_t own_client_{0}, openings_frames_{0};
+  std::optional<uint16_t> openings_;
+#endif
 };
 
 // Uart must provide available/read/overflow/discard_rx. This helper cannot write.

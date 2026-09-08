@@ -1,0 +1,9 @@
+# Published at boot by ESPHome even with logger.level: INFO. No restart action.
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: Reset Reason
+      entity_category: diagnostic
+    device:
+      name: Device Info
+      entity_category: diagnostic

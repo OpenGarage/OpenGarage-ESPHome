@@ -22,7 +22,7 @@
 #endif
 #include "esphome/components/button/button.h"
 #endif
-#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1)
+#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
 #include "esphome/components/ota/ota_backend.h"
 #endif
 #if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
@@ -33,7 +33,7 @@
 namespace esphome::opengarage {
 
 class OpenGarageComponent : public Component
-#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1)
+#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
     , public ota::OTAGlobalStateListener
 #endif
 #if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
@@ -102,6 +102,15 @@ class OpenGarageComponent : public Component
     if (index < secplus2_diagnostics_.size()) secplus2_diagnostics_[index] = value;
   }
 #endif
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  void set_secplus2_query_config(InternalGPIOPin *tx, uint32_t client) { secplus2_tx_pin_ = tx; secplus2_client_ = client; }
+  void set_secplus2_sync_text(text_sensor::TextSensor *value) { secplus2_sync_text_ = value; }
+  void set_secplus2_rolling_text(text_sensor::TextSensor *value) { secplus2_rolling_text_ = value; }
+  void set_secplus2_openings(sensor::Sensor *value) { secplus2_openings_ = value; }
+  void set_secplus2_tx_diagnostic(size_t i, sensor::Sensor *value) {
+    if (i < secplus2_tx_diagnostics_.size()) secplus2_tx_diagnostics_[i] = value;
+  }
+#endif
 #ifdef USE_OPENGARAGE_CONTROL
   void set_bench_mac(const std::string &value) { bench_mac_ = value; }
   void set_control_pins(InternalGPIOPin *door, InternalGPIOPin *buzzer) { door_pin_ = door; buzzer_pin_ = buzzer; }
@@ -115,7 +124,7 @@ class OpenGarageComponent : public Component
   void set_pulse_count_sensor(sensor::Sensor *sensor) { pulse_count_sensor_ = sensor; }
   void request_control(bool cancel);
 #endif
-#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1)
+#if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
   void on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *component) override;
 #endif
 #if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
@@ -165,6 +174,14 @@ class OpenGarageComponent : public Component
   InternalGPIOPin *secplus2_rx_pin_{nullptr};
   std::array<binary_sensor::BinarySensor *, 3> secplus2_binary_{};
   std::array<sensor::Sensor *, 10> secplus2_diagnostics_{};
+#endif
+#ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  InternalGPIOPin *secplus2_tx_pin_{nullptr};
+  uint32_t secplus2_client_{0};
+  text_sensor::TextSensor *secplus2_sync_text_{nullptr}, *secplus2_rolling_text_{nullptr};
+  sensor::Sensor *secplus2_openings_{nullptr};
+  std::array<sensor::Sensor *, 5> secplus2_tx_diagnostics_{};
+  bool secplus2_stopped_{false};
 #endif
 #ifdef USE_OPENGARAGE_CONTROL
   void service_control_(uint32_t now);
