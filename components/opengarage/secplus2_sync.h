@@ -6,7 +6,8 @@
 
 namespace esphome::opengarage {
 
-// Query-only lab session. This type cannot encode door/light/lock/learn commands.
+// Lab query session. Actuation encoders exist only with the separate control
+// opt-in; the query-only image cannot encode door/light/lock/learn commands.
 // A received response after a query is evidence of observed traffic, NOT an
 // authenticated acknowledgement that this client's rolling sequence was accepted.
 class Secplus2QuerySession {
@@ -58,6 +59,23 @@ class Secplus2QuerySession {
     next_openings_ = !next_openings_;
   }
   void defer(uint32_t now) { last_attempt_ms_ = now; } // No catch-up or per-loop contention storm.
+#ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
+  // Only the control opt-in can encode actuations. No raw command, Toggle,
+  // Stop, lock or learn entrypoint. Cleanup may encode a release after a failed
+  // press write, but the transport forbids starting a new action in that state.
+  bool encode_door(bool open, bool pressed, uint8_t *packet) const {
+    return encode_control_(0x280, (uint32_t(open) << 8) | 0x01000000U |
+                                    (uint32_t(pressed) << 16), packet);
+  }
+  bool encode_light(bool on, uint8_t *packet) const {
+    return encode_control_(0x281, uint32_t(on) << 8, packet);
+  }
+  void control_sent(uint32_t now, bool ok) {
+    last_attempt_ms_ = now;
+    rolling_ = (rolling_ + 1) & ROLLING_MASK;
+    if (!ok) state_ = State::WRITE_FAILED;
+  }
+#endif
   void stop() { state_ = State::STOPPED; }
   State state() const { return state_; }
   uint32_t rolling() const { return rolling_; }
@@ -72,6 +90,13 @@ class Secplus2QuerySession {
     }
   }
  protected:
+#ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
+  bool encode_control_(uint16_t command, uint32_t payload, uint8_t *packet) const {
+    if (!client_) return false;
+    return encode_wireline(rolling_, uint64_t(client_) | (uint64_t(command & 0xF00U) << 24),
+                           payload | (command & 0xFFU), packet) == 0;
+  }
+#endif
   State state_{State::STOPPED};
   uint32_t client_{0}, rolling_{0}, started_ms_{0}, last_attempt_ms_{0};
   uint32_t status_baseline_{0}, openings_baseline_{0};

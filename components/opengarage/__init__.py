@@ -10,11 +10,11 @@ from esphome.const import CONF_ID
 
 def AUTO_LOAD(config):
     components = ["sensor", "binary_sensor", "text_sensor"]
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
         components.append("button")
-    if "pulse_control" in config or "secplus1_control" in config:
+    if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control")):
         components += ["cover", "web_server_base"]
-    if "secplus1_control" in config:
+    if "secplus1_control" in config or "secplus2_control" in config:
         components.append("light")
     if "dev_secplus2_rx" in config:
         components.append("opengarage_secplus_codec")
@@ -28,6 +28,8 @@ ControlCommandButton = ns.class_("ControlCommandButton", button.Button)
 PulseCover = ns.class_("PulseCover", cover.Cover)
 Secplus1Cover = ns.class_("Secplus1Cover", cover.Cover)
 Secplus1Light = ns.class_("Secplus1Light", light.LightOutput)
+Secplus2Cover = ns.class_("Secplus2Cover", cover.Cover)
+Secplus2Light = ns.class_("Secplus2Light", light.LightOutput)
 UpdateModeButton = ns.class_("UpdateModeButton", button.Button)
 StateSource = ns.enum("StateSource", is_class=True)
 Mounting = ns.enum("Mounting", is_class=True)
@@ -67,6 +69,11 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
+    if "secplus2_control" in value:
+        if "dev_secplus2_sync" not in value:
+            raise cv.Invalid("Security+ 2.0 controls require explicit dev_secplus2_sync ownership")
+        if any(key in value for key in ("dev_pulse_control", "pulse_control", "dev_secplus1", "secplus1_control")):
+            raise cv.Invalid("Security+ 2.0 controls cannot share pins with another backend")
     if "dev_secplus2_sync" in value:
         if "dev_secplus2_rx" not in value:
             raise cv.Invalid("Security+ 2.0 queries require dev_secplus2_rx")
@@ -238,6 +245,13 @@ SECPLUS1_CONTROL_SCHEMA = cv.Schema({
     cv.Required("light_command_count"): sensor.sensor_schema(accuracy_decimals=0, state_class="total_increasing", entity_category="diagnostic"),
 })
 
+# Same outward warning/entity contract, with a distinct protocol-only backend.
+SECPLUS2_CONTROL_SCHEMA = SECPLUS1_CONTROL_SCHEMA.extend({
+    cv.Required("cover"): cover.cover_schema(Secplus2Cover, device_class="garage"),
+    cv.Required("light"): cv.All(_light_options, light.light_schema(
+        Secplus2Light, light.LightType.BINARY, default_restore_mode="ALWAYS_OFF")),
+})
+
 CONFIG_SCHEMA = cv.All(
     cv.only_on(["esp8266"]), _add_pins,
     cv.Schema({
@@ -249,6 +263,7 @@ CONFIG_SCHEMA = cv.All(
         cv.Optional("dev_secplus2_sync"): SECPLUS2_SYNC_SCHEMA,
         cv.Optional("dev_secplus1"): SECPLUS1_SCHEMA,
         cv.Optional("secplus1_control"): SECPLUS1_CONTROL_SCHEMA,
+        cv.Optional("secplus2_control"): SECPLUS2_CONTROL_SCHEMA,
         cv.Optional("state_source", default="distance"): cv.enum(SOURCES, lower=True),
         cv.Optional("mounting", default="ceiling"): cv.enum(MOUNTINGS, lower=True),
         cv.Optional("contact_type", default="none"): cv.enum(CONTACTS, lower=True),
@@ -306,7 +321,7 @@ def _final_validate(config):
         raise cv.Invalid("PlatformIO must not override DIO flash mode")
     if full.get("logger", {}).get("hardware_uart", "UART0") != "UART0":
         raise cv.Invalid("OpenGarage logger must use UART0; swapped UART0 and UART1 use reserved pins")
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
         if not full.get("api", {}).get("encryption"):
             raise cv.Invalid("M2 bench control requires encrypted native API")
         if not full.get("wifi") or not full.get("ota"):
@@ -317,7 +332,7 @@ def _final_validate(config):
             raise cv.Invalid("M2 bench control requires authenticated native OTA")
         if full.get("web_server") and not full["web_server"].get("auth"):
             raise cv.Invalid("M2 bench control requires authenticated web_server")
-        if "pulse_control" in config or "secplus1_control" in config:
+        if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control")):
             if not full.get("web_server", {}).get("auth"):
                 raise cv.Invalid("Pulse MVP requires authenticated web_server for guarded browser recovery")
             if not any(item["platform"] == "web_server" for item in full["ota"]):
@@ -392,14 +407,17 @@ async def to_code(config):
         for index, key in enumerate(SECPLUS2_TX_COUNTERS):
             if key in dev:
                 cg.add(var.set_secplus2_tx_diagnostic(index, await sensor.new_sensor(dev[key])))
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
         bench = "dev_pulse_control" in config
         sec1_control = "secplus1_control" in config
-        dev = config["dev_pulse_control"] if bench else config["secplus1_control" if sec1_control else "pulse_control"]
+        sec2_control = "secplus2_control" in config
+        dev = config["dev_pulse_control" if bench else "secplus1_control" if sec1_control else
+                     "secplus2_control" if sec2_control else "pulse_control"]
         require_waveform()  # Arduino tone() must not resolve to ESPHome's no-op waveform stubs.
         cg.add_define("USE_OPENGARAGE_CONTROL")
         cg.add_define("USE_OPENGARAGE_M2_BENCH" if bench else
-                      "USE_OPENGARAGE_SECPLUS1_CONTROL" if sec1_control else "USE_OPENGARAGE_PULSE_MVP")
+                      "USE_OPENGARAGE_SECPLUS1_CONTROL" if sec1_control else
+                      "USE_OPENGARAGE_SECPLUS2_CONTROL" if sec2_control else "USE_OPENGARAGE_PULSE_MVP")
         ota.request_ota_state_listeners()
         cg.add(var.set_bench_mode(bench))
         if bench:
@@ -408,7 +426,7 @@ async def to_code(config):
             cg.add(var.set_cover(await cover.new_cover(dev["cover"], var)))
             cg.add(var.set_state_valid_sensor(await binary_sensor.new_binary_sensor(dev["state_valid"])))
             await button.new_button(dev["firmware_update_mode"], var)
-        if sec1_control:
+        if sec1_control or sec2_control:
             cg.add(var.set_control_pins(cg.nullptr, await cg.gpio_pin_expression(dev["buzzer_pin"])))
             cg.add(var.set_control_timing(dev["warning_time"].total_milliseconds, 1000,
                                          dev["lockout_time"].total_milliseconds))

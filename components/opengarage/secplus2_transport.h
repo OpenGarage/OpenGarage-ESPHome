@@ -27,6 +27,19 @@ class Secplus2Transport {
   uint32_t deferrals() const { return deferrals_; }
   uint32_t tx_errors() const { return tx_errors_; }
   uint32_t max_tx_us() const { return max_tx_us_; }
+#ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
+  bool controls_available() const {
+    return started_ && tx_ && !stopped_ && !control_fault_ &&
+        session_.state() == Secplus2QuerySession::State::OBSERVED && receiver_.valid();
+  }
+  bool command_idle(uint32_t now) const;
+  bool press_door(uint32_t now);
+  bool set_light(uint32_t now, bool on);
+  bool releasing() const { return release_pending_; }
+  void cancel_press() { expedited_release_ = release_pending_; }
+  uint32_t door_commands() const { return door_commands_; }
+  uint32_t light_commands() const { return light_commands_; }
+#endif
 #endif
  protected:
   class ReceiveUart : public SoftwareSerial {
@@ -50,6 +63,17 @@ class Secplus2Transport {
   Ticker force_low_;
   uint32_t query_writes_{0}, collisions_{0}, deferrals_{0}, tx_errors_{0}, max_tx_us_{0};
   bool stopped_{false};
+#ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
+  enum class WriteResult { COLLISION, SENT, FAILED };
+  WriteResult write_control_(const uint8_t *packet, bool force_release = false);
+  void service_release_(uint32_t now, bool backlog);
+  void emergency_release_();
+  bool bus_idle_(uint32_t now) const;
+  uint32_t pressed_ms_{0}, last_tx_ms_{0}, release_attempt_ms_{0};
+  uint32_t door_commands_{0}, light_commands_{0};
+  bool release_pending_{false}, release_open_{false}, expedited_release_{false};
+  bool control_fault_{false}, tx_seen_{false}, refresh_status_{false};
+#endif
 #endif
 };
 

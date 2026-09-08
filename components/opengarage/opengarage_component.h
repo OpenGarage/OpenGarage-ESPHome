@@ -17,6 +17,9 @@
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
 #include "secplus1_outputs.h"
 #include "secplus1_controls.h"
+#elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+#include "secplus2_outputs.h"
+#include "secplus2_controls.h"
 #else
 #include "pulse_outputs.h"
 #endif
@@ -25,7 +28,7 @@
 #if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
 #include "esphome/components/ota/ota_backend.h"
 #endif
-#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
 #include "pulse_cover.h"
 #include "update_guard.h"
 #endif
@@ -36,10 +39,10 @@ class OpenGarageComponent : public Component
 #if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
     , public ota::OTAGlobalStateListener
 #endif
-#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
     , public CoverCommands
 #endif
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
     , public OpenerLightCommands
 #endif
 {
@@ -127,15 +130,20 @@ class OpenGarageComponent : public Component
 #if defined(USE_OPENGARAGE_CONTROL) || defined(USE_OPENGARAGE_SECPLUS1) || defined(USE_OPENGARAGE_SECPLUS2_SYNC)
   void on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *component) override;
 #endif
-#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
   void set_cover(Secplus1Cover *value) { cover_ = value; }
   void set_light(Secplus1Light *value) { opener_light_ = value; }
+#elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+  void set_cover(Secplus2Cover *value) { cover_ = value; }
+  void set_light(Secplus2Light *value) { opener_light_ = value; }
+#else
+  void set_cover(PulseCover *value) { cover_ = value; }
+#endif
+#if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   void set_light_reason(text_sensor::TextSensor *value) { light_reason_ = value; }
   void set_light_count(sensor::Sensor *value) { light_count_ = value; }
   void request_light(bool target) override;
-#else
-  void set_cover(PulseCover *value) { cover_ = value; }
 #endif
   void set_state_valid_sensor(binary_sensor::BinarySensor *value) { state_valid_sensor_ = value; }
   void request_door(DoorCommand command) override;
@@ -190,11 +198,17 @@ class OpenGarageComponent : public Component
   Secplus1Outputs pulse_outputs_{secplus1_};
   Secplus1LightIntent light_intent_{secplus1_};
   Secplus1Light *opener_light_{nullptr};
+#elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+  Secplus2Outputs pulse_outputs_{secplus2_};
+  Secplus2LightIntent light_intent_{secplus2_};
+  Secplus2Light *opener_light_{nullptr};
+#else
+  PulseOutputs pulse_outputs_;
+#endif
+#if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   text_sensor::TextSensor *light_reason_{nullptr};
   sensor::Sensor *light_count_{nullptr};
   bool light_enabled_() const;
-#else
-  PulseOutputs pulse_outputs_;
 #endif
   ActionController action_controller_{pulse_outputs_};
   ControlButton control_button_;
@@ -206,9 +220,11 @@ class OpenGarageComponent : public Component
   text_sensor::TextSensor *phase_text_{nullptr}, *reason_text_{nullptr};
   sensor::Sensor *pulse_count_sensor_{nullptr};
 #endif
-#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
   Secplus1Cover *cover_{nullptr};
+#elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+  Secplus2Cover *cover_{nullptr};
 #else
   PulseCover *cover_{nullptr};
 #endif
@@ -228,7 +244,7 @@ class ControlCommandButton : public button::Button {
 };
 #endif
 
-#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+#if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
 class UpdateModeButton : public button::Button {
  public:
   explicit UpdateModeButton(OpenGarageComponent *parent) : parent_(parent) {}
