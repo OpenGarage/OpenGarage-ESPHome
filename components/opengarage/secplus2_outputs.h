@@ -40,6 +40,8 @@ class Secplus2Outputs : public ControlOutputs {
     if (buzzer_) { noTone(13); buzzer_->digital_write(false); }
   }
   bool pulse(uint32_t) override { return buzzer_ && port_.press_door(millis()); }
+  bool toggle(uint32_t, DoorState expected) override { return buzzer_ && port_.toggle_door(millis(), expected); }
+  bool reports_motion() const override { return true; }
   bool pulse_active() const override { return port_.releasing(); }
   void stop() override { warning_stop(); port_.cancel_press(); }
  protected:

@@ -530,6 +530,7 @@ bool OpenGarageComponent::auxiliary_enabled_() const {
   return identification_done_ && control_hardware_ok_ && !secplus2_stopped_ &&
 #endif
       !update_gate_.open() && action_controller_.armed() && !action_controller_.pending() &&
+      action_controller_.endpoint_ready() && // Toggle motion readiness does not expand auxiliary controls.
       wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
 }
 bool OpenGarageComponent::light_enabled_() const { return auxiliary_enabled_() && !lock_intent_.waiting(); }

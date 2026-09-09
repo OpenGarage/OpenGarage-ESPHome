@@ -13,6 +13,9 @@ class ControlOutputs {
   virtual bool warning_tick(uint32_t elapsed_ms) = 0;
   virtual void warning_stop() = 0;
   virtual bool pulse(uint32_t duration_ms) = 0;
+  // A wall-button press is distinct from an endpoint-directed cover request.
+  virtual bool toggle(uint32_t duration_ms, DoorState) { return pulse(duration_ms); }
+  virtual bool reports_motion() const { return false; }
   virtual bool pulse_active() const = 0;
   virtual void stop() = 0;
 };
@@ -23,7 +26,8 @@ enum class CommandSource : uint8_t { NETWORK, LOCAL_BUTTON };
 enum class ActionReason : uint8_t {
   NONE, DISARMED, ARMED, WARNING, DISPATCHED, BUSY, LOCKOUT, UNKNOWN_STATE,
   HARDWARE_MISMATCH, LINK_DOWN, CANCELED, STATE_CHANGED, LOOP_STALL, EXPIRED,
-  SHUTDOWN, OUTPUT_FAILURE, CONFIG_INVALID, READY, ALREADY_AT_TARGET, UNSUPPORTED
+  SHUTDOWN, OUTPUT_FAILURE, CONFIG_INVALID, READY, ALREADY_AT_TARGET, UNSUPPORTED,
+  REPEAT_GUARD, TARGET_LOCKOUT
 };
 
 inline const char *action_phase_name(ActionPhase phase) {
@@ -43,6 +47,8 @@ inline const char *action_reason_name(ActionReason reason) {
     case ActionReason::DISPATCHED: return "Pulse dispatched";
     case ActionReason::BUSY: return "Busy; not queued";
     case ActionReason::LOCKOUT: return "Command lockout";
+    case ActionReason::REPEAT_GUARD: return "Brief repeat guard; not queued";
+    case ActionReason::TARGET_LOCKOUT: return "Open/Close cooldown; Toggle available";
     case ActionReason::UNKNOWN_STATE: return "Required state unknown";
     case ActionReason::HARDWARE_MISMATCH: return "Bench identity or hardware mismatch";
     case ActionReason::LINK_DOWN: return "Wi-Fi disconnected";
@@ -63,7 +69,7 @@ inline const char *action_reason_name(ActionReason reason) {
 struct ActionConfig {
   uint32_t warning_ms{5000};
   uint32_t pulse_ms{1000};  // Stock default, deliberately capped at 1 s for this bench slice.
-  uint32_t lockout_ms{30000};
+  uint32_t lockout_ms{30000}; // Cover Open/Close cooldown; all commands in the historical bench profile.
   bool bench_mode{true};
 };
 
@@ -71,6 +77,7 @@ class ActionController {
  public:
   static constexpr uint32_t MAX_SERVICE_GAP_MS = 500;
   static constexpr uint32_t ARM_SESSION_MS = 300000;
+  static constexpr uint32_t REPEAT_GUARD_MS = 1000;
   explicit ActionController(ControlOutputs &outputs) : outputs_(outputs) {}
   bool configure(ActionConfig config) {
     config_valid_ = config.warning_ms >= 5000 && config.warning_ms <= 30000 &&
@@ -83,6 +90,7 @@ class ActionController {
   void initialize(uint32_t now) {
     outputs_.stop();
     armed_ = cooldown_ = inputs_seen_ = false;
+    dispatch_seen_ = false;
     stopped_ = manually_disabled_ = false;
     action_source_ = CommandSource::NETWORK;
     phase_ = ActionPhase::DISARMED;
@@ -96,12 +104,13 @@ class ActionController {
     link_ok_ = link_ok;
     last_service_ = now;
     inputs_seen_ = true;
+    if (dispatch_seen_ && uint32_t(now - dispatched_at_) >= REPEAT_GUARD_MS) dispatch_seen_ = false;
     if (cooldown_ && uint32_t(now - dispatched_at_) >= config_.lockout_ms) cooldown_ = false;
     if (stopped_) return;
     if (!config_.bench_mode && config_valid_ && !manually_disabled_ && !armed_ &&
         hardware_ok_ && known_()) {
       armed_ = true;
-      phase_ = cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+      phase_ = idle_phase_();
       if (reason_ == ActionReason::DISARMED) reason_ = ActionReason::READY;
     }
     if (pending() && gap > MAX_SERVICE_GAP_MS) { disarm(ActionReason::LOOP_STALL); return; }
@@ -119,14 +128,9 @@ class ActionController {
       const bool warning_complete = outputs_.warning_tick(elapsed);
       if (elapsed < config_.warning_ms || !warning_complete) return;
       outputs_.warning_stop();
-      if (!outputs_.pulse(config_.pulse_ms)) { disarm(ActionReason::OUTPUT_FAILURE); return; }
-      ++dispatches_;
-      dispatched_at_ = now;
-      cooldown_ = true;
-      phase_ = ActionPhase::PULSING;
-      reason_ = ActionReason::DISPATCHED;
+      dispatch_(now);
     } else if (phase_ == ActionPhase::PULSING) {
-      if (!outputs_.pulse_active()) phase_ = cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+      if (!outputs_.pulse_active()) phase_ = idle_phase_();
       else if (uint32_t(now - dispatched_at_) > config_.pulse_ms + MAX_SERVICE_GAP_MS)
         disarm(ActionReason::OUTPUT_FAILURE);
     } else if (phase_ == ActionPhase::LOCKOUT && !cooldown_) {
@@ -141,7 +145,7 @@ class ActionController {
     if (!hardware_ok_) return reject_(ActionReason::HARDWARE_MISMATCH);
     if (config_.bench_mode && !link_ok_) return reject_(ActionReason::LINK_DOWN);
     if (!known_()) return reject_(ActionReason::UNKNOWN_STATE);
-    if (cooldown_) return reject_(ActionReason::LOCKOUT);
+    if (config_.bench_mode && cooldown_) return reject_(ActionReason::LOCKOUT);
     if (pending()) return reject_(ActionReason::BUSY);
     armed_ = true;
     armed_at_ = now;
@@ -159,7 +163,7 @@ class ActionController {
   bool request_local_toggle(uint32_t now) { return request_(now, DoorCommand::TOGGLE, CommandSource::LOCAL_BUTTON); }
   void cancel(uint32_t, ActionReason reason = ActionReason::CANCELED) {
     outputs_.stop();  // Cut a contact pulse short if necessary; not a physical door Stop command.
-    phase_ = !armed_ ? ActionPhase::DISARMED : cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+    phase_ = !armed_ ? ActionPhase::DISARMED : idle_phase_();
     reason_ = reason;
   }
   void disarm(ActionReason reason = ActionReason::DISARMED) {
@@ -172,6 +176,7 @@ class ActionController {
   void shutdown() { disarm(ActionReason::SHUTDOWN); stopped_ = true; }
   void reject_unsupported() { reason_ = ActionReason::UNSUPPORTED; }
   bool armed() const { return armed_; }
+  bool endpoint_ready() const { return endpoint_(); }
   bool pending() const { return phase_ == ActionPhase::WARNING || phase_ == ActionPhase::PULSING; }
   ActionPhase phase() const { return phase_; }
   ActionReason reason() const { return reason_; }
@@ -182,7 +187,11 @@ class ActionController {
   bool request_(uint32_t now, DoorCommand command, CommandSource source) {
     if (!armed_ || stopped_) return reject_(ActionReason::DISARMED);
     if (pending()) return reject_(ActionReason::BUSY);
-    if (cooldown_) return reject_(ActionReason::LOCKOUT);
+    const bool wall_toggle = !config_.bench_mode && command == DoorCommand::TOGGLE;
+    if (cooldown_ && !wall_toggle)
+      return reject_(config_.bench_mode ? ActionReason::LOCKOUT : ActionReason::TARGET_LOCKOUT);
+    if (!config_.bench_mode && dispatch_seen_ && uint32_t(now - dispatched_at_) < REPEAT_GUARD_MS)
+      return reject_(ActionReason::REPEAT_GUARD);
     if (!inputs_seen_ || uint32_t(now - last_service_) > MAX_SERVICE_GAP_MS) {
       disarm(ActionReason::LOOP_STALL); return false;
     }
@@ -191,6 +200,9 @@ class ActionController {
       disarm(!hardware_ok_ ? ActionReason::HARDWARE_MISMATCH : ActionReason::UNKNOWN_STATE);
       return false;
     }
+    // Refusing an endpoint-only cover request must not disable the available
+    // wall-button action during protocol motion or while stopped partway.
+    if (!wall_toggle && !endpoint_()) return reject_(ActionReason::UNKNOWN_STATE);
     if (needs_link_(source) && !link_ok_) {
       if (config_.bench_mode) disarm(ActionReason::LINK_DOWN);
       return reject_(ActionReason::LINK_DOWN);  // A rejected remote request must not disable local MVP use.
@@ -200,23 +212,49 @@ class ActionController {
       return reject_(ActionReason::ALREADY_AT_TARGET);
     warning_state_ = state_;
     action_source_ = source;  // Rejected requests cannot reclassify an existing action.
+    action_command_ = command;
+    // Only actual protocol motion reports qualify. Distance/contact state and
+    // time since a prior command are not evidence that the door is moving.
+    if (wall_toggle && outputs_.reports_motion() &&
+        (state_ == DoorState::OPENING || state_ == DoorState::CLOSING))
+      return dispatch_(now);
     warning_at_ = now;
     phase_ = ActionPhase::WARNING;
     reason_ = ActionReason::WARNING;
     outputs_.warning_start(config_.warning_ms);
     return true;
   }
-  bool known_() const { return state_ == DoorState::CLOSED || state_ == DoorState::OPEN; }
+  bool endpoint_() const { return state_ == DoorState::CLOSED || state_ == DoorState::OPEN; }
+  bool known_() const {
+    return endpoint_() || (!config_.bench_mode && outputs_.reports_motion() &&
+        (state_ == DoorState::OPENING || state_ == DoorState::CLOSING || state_ == DoorState::STOPPED));
+  }
+  ActionPhase idle_phase_() const {
+    return config_.bench_mode && cooldown_ ? ActionPhase::LOCKOUT : ActionPhase::IDLE;
+  }
+  bool dispatch_(uint32_t now) {
+    const bool wall_toggle = !config_.bench_mode && action_command_ == DoorCommand::TOGGLE;
+    const bool sent = wall_toggle ? outputs_.toggle(config_.pulse_ms, warning_state_) : outputs_.pulse(config_.pulse_ms);
+    if (!sent) { disarm(ActionReason::OUTPUT_FAILURE); return false; }
+    ++dispatches_;
+    dispatched_at_ = now;
+    dispatch_seen_ = cooldown_ = true;
+    phase_ = ActionPhase::PULSING;
+    reason_ = ActionReason::DISPATCHED;
+    return true;
+  }
   bool reject_(ActionReason reason) { reason_ = reason; return false; }
   ControlOutputs &outputs_;
   ActionConfig config_;
   DoorState state_{DoorState::UNKNOWN}, warning_state_{DoorState::UNKNOWN};
   ActionPhase phase_{ActionPhase::DISARMED};
   CommandSource action_source_{CommandSource::NETWORK};
+  DoorCommand action_command_{DoorCommand::TOGGLE};
   ActionReason reason_{ActionReason::DISARMED};
   uint32_t last_service_{0}, warning_at_{0}, dispatched_at_{0}, armed_at_{0}, dispatches_{0};
   bool armed_{false}, cooldown_{false}, inputs_seen_{false}, hardware_ok_{false}, link_ok_{false};
   bool config_valid_{true}, stopped_{false}, manually_disabled_{false};
+  bool dispatch_seen_{false};
 };
 
 // Owns the complete physical gesture. A press canceling a warning is consumed

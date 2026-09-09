@@ -26,6 +26,7 @@ class Secplus1Transport {
   bool controls_available() const { return started_ && tx_ && !control_fault_ && panel_.commands_ready(); }
   bool command_idle(uint32_t now) const;
   bool press_door(uint32_t now);
+  bool toggle_door(uint32_t now, DoorState expected);
   bool press_light(uint32_t now);
   bool set_lock(uint32_t now, bool locked);
   bool releasing() const { return releases_left_ != 0; }
@@ -35,6 +36,7 @@ class Secplus1Transport {
   uint32_t light_commands() const { return light_commands_; }
   uint32_t lock_commands() const { return lock_commands_; }
  protected:
+  bool door_press_(uint32_t now, bool toggle, DoorState expected = DoorState::UNKNOWN);
   bool press_(uint8_t press, uint8_t release, uint32_t now, DoorState door, std::optional<bool> binary);
   void service_release_(uint32_t now, bool backlog);
   void emergency_release_();

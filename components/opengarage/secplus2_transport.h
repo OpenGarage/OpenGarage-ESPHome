@@ -34,6 +34,7 @@ class Secplus2Transport {
   }
   bool command_idle(uint32_t now) const;
   bool press_door(uint32_t now);
+  bool toggle_door(uint32_t now, DoorState expected);
   bool set_light(uint32_t now, bool on);
   bool set_lock(uint32_t now, bool locked);
   bool releasing() const { return release_pending_; }
@@ -67,6 +68,8 @@ class Secplus2Transport {
   bool stopped_{false};
 #ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
   enum class WriteResult { COLLISION, SENT, FAILED };
+  bool door_press_(uint32_t now, bool toggle, DoorState expected = DoorState::UNKNOWN);
+  bool encode_release_(uint8_t *packet) const;
   WriteResult write_control_(const uint8_t *packet, bool force_release = false);
   void service_release_(uint32_t now, bool backlog);
   void emergency_release_();
@@ -74,6 +77,7 @@ class Secplus2Transport {
   uint32_t pressed_ms_{0}, last_tx_ms_{0}, release_attempt_ms_{0};
   uint32_t door_commands_{0}, light_commands_{0}, lock_commands_{0};
   bool release_pending_{false}, release_open_{false}, expedited_release_{false};
+  bool release_toggle_{false};
   bool control_fault_{false}, tx_seen_{false}, refresh_status_{false};
 #endif
 #endif

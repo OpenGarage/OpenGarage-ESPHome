@@ -77,9 +77,16 @@ bool Secplus1Transport::command_idle(uint32_t now) const {
       uint32_t(now - receiver_.last_byte_ms()) >= 50 && !rx_->digital_read();
 }
 bool Secplus1Transport::press_door(uint32_t now) {
+  return door_press_(now, false);
+}
+bool Secplus1Transport::toggle_door(uint32_t now, DoorState expected) {
+  return door_press_(now, true, expected);
+}
+bool Secplus1Transport::door_press_(uint32_t now, bool toggle, DoorState expected) {
   receiver_.tick(now);
   const auto door = receiver_.door();
-  if (door != DoorState::CLOSED && door != DoorState::OPEN) return false;
+  if (door == DoorState::UNKNOWN || (!toggle && door != DoorState::CLOSED && door != DoorState::OPEN)) return false;
+  if (toggle && door != expected) return false; // Bind the controller's warning/motion decision to this report.
   if (!press_(0x30, 0x31, now, door, {})) return false;
   ++door_commands_;
   return true;

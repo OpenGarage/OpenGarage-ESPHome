@@ -97,6 +97,8 @@ class UnifiedOutputs : public ControlOutputs {
   bool warning_tick(uint32_t ms) override { return active_ && active_->warning_tick(ms); }
   void warning_stop() override { if (active_) active_->warning_stop(); }
   bool pulse(uint32_t ms) override { return active_ && active_->pulse(ms); }
+  bool toggle(uint32_t ms, DoorState expected) override { return active_ && active_->toggle(ms, expected); }
+  bool reports_motion() const override { return active_ && active_->reports_motion(); }
   bool pulse_active() const override { return active_ && active_->pulse_active(); }
   void stop() override { if (active_) active_->stop(); }
  protected:

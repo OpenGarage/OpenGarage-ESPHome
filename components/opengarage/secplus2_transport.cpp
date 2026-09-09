@@ -134,25 +134,37 @@ Secplus2Transport::WriteResult Secplus2Transport::write_control_(const uint8_t *
   return ok ? WriteResult::SENT : WriteResult::FAILED;
 }
 bool Secplus2Transport::press_door(uint32_t now) {
+  return door_press_(now, false);
+}
+bool Secplus2Transport::toggle_door(uint32_t now, DoorState expected) {
+  return door_press_(now, true, expected);
+}
+bool Secplus2Transport::door_press_(uint32_t now, bool toggle, DoorState expected) {
   receiver_.tick(now);
   const auto baseline = receiver_.door();
-  if ((baseline != DoorState::OPEN && baseline != DoorState::CLOSED) || !command_idle(now)) return false;
+  if (baseline == DoorState::UNKNOWN ||
+      (!toggle && baseline != DoorState::OPEN && baseline != DoorState::CLOSED) || !command_idle(now)) return false;
+  if (toggle && baseline != expected) return false; // A stale moving decision must not become an un-warned start.
   // Decode any pending edges/bytes before choosing a direction. Refuse if the
   // endpoint changed, even if the controller hasn't published it yet.
   const bool backlog = pump_secplus2(uart_, receiver_, now, [] { return micros(); });
   if (backlog || !command_idle(now) || receiver_.door() != baseline) return false;
   uint8_t packet[Secplus2Receiver::PACKET_SIZE];
   const bool open = baseline == DoorState::CLOSED;
-  if (!session_.encode_door(open, true, packet)) return false;
+  if (!(toggle ? session_.encode_toggle(true, packet) : session_.encode_door(open, true, packet))) return false;
   const auto result = write_control_(packet);
   if (result == WriteResult::COLLISION) return false; // No UART write, no late retry.
   release_open_ = open;
+  release_toggle_ = toggle;
   release_pending_ = true;
   pressed_ms_ = release_attempt_ms_ = millis();
   expedited_release_ = result == WriteResult::FAILED;
   if (result != WriteResult::SENT) return false; // Partial press is ambiguous; release only.
   ++door_commands_;
   return true; // Software write, not an opener acknowledgement.
+}
+bool Secplus2Transport::encode_release_(uint8_t *packet) const {
+  return release_toggle_ ? session_.encode_toggle(false, packet) : session_.encode_door(release_open_, false, packet);
 }
 bool Secplus2Transport::set_light(uint32_t now, bool on) {
   receiver_.tick(now);
@@ -183,7 +195,7 @@ void Secplus2Transport::service_release_(uint32_t now, bool backlog) {
   if (!overdue && (backlog || !bus_idle_(now))) return;
   release_attempt_ms_ = now;
   uint8_t packet[Secplus2Receiver::PACKET_SIZE];
-  if (!session_.encode_door(release_open_, false, packet)) {
+  if (!encode_release_(packet)) {
     control_fault_ = true; release_pending_ = false; return;
   }
   const auto result = write_control_(packet, overdue);
@@ -196,7 +208,7 @@ void Secplus2Transport::service_release_(uint32_t now, bool backlog) {
 void Secplus2Transport::emergency_release_() {
   if (started_ && tx_ && release_pending_) {
     uint8_t packet[Secplus2Receiver::PACKET_SIZE];
-    if (session_.encode_door(release_open_, false, packet)) (void) write_control_(packet, true);
+    if (encode_release_(packet)) (void) write_control_(packet, true);
   }
   release_pending_ = false;
   force_low_.detach();
