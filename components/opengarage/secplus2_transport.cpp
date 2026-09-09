@@ -165,6 +165,17 @@ bool Secplus2Transport::set_light(uint32_t now, bool on) {
   ++light_commands_; refresh_status_ = true;
   return true; // Explicit ON/OFF; never toggle, synthesize observed state or retry.
 }
+bool Secplus2Transport::set_lock(uint32_t now, bool locked) {
+  receiver_.tick(now);
+  if (!command_idle(now)) return false;
+  const bool backlog = pump_secplus2(uart_, receiver_, now, [] { return micros(); });
+  const auto value = receiver_.locked();
+  if (backlog || !command_idle(now) || !value || *value == locked) return false;
+  uint8_t packet[Secplus2Receiver::PACKET_SIZE];
+  if (!session_.encode_lock(locked, packet) || write_control_(packet) != WriteResult::SENT) return false;
+  ++lock_commands_; refresh_status_ = true;
+  return true; // Explicit LOCK/UNLOCK, never a guessed toggle or acknowledgement.
+}
 void Secplus2Transport::service_release_(uint32_t now, bool backlog) {
   const bool overdue = uint32_t(now - pressed_ms_) >= 1000;
   if (!overdue && ((!expedited_release_ && uint32_t(now - pressed_ms_) < 250) ||

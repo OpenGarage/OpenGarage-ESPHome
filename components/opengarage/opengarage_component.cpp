@@ -38,7 +38,12 @@ void OpenGarageComponent::setup() {
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #endif
 #ifdef USE_OPENGARAGE_CONTROL
-#if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+#ifdef USE_OPENGARAGE_UNIFIED
+  unified_port_.bind(active_settings_.protocol);
+  pulse_outputs_.setup(active_settings_.protocol, door_pin_, buzzer_pin_);
+  if (active_settings_.protocol != OpenerProtocol::PULSE) config_.source = StateSource::PROTOCOL;
+  publish_settings_();
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   pulse_outputs_.setup(buzzer_pin_);
 #else
   pulse_outputs_.setup(door_pin_, buzzer_pin_);
@@ -47,7 +52,11 @@ void OpenGarageComponent::setup() {
   action_controller_.initialize(millis());
   control_button_.update(millis(), !button_pin_->digital_read(), action_controller_);
   ota::get_global_ota_callback()->add_global_state_listener(this);
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  publish_text(family_text_, "v2.3 unified experimental");
+  ESP_LOGW(TAG, "Unified protocol: %s; changes require restart; no automatic protocol detection",
+           protocol_name(active_settings_.protocol));
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   publish_text(family_text_, "v2.3 Security+ 1.0 control prototype");
   ESP_LOGW(TAG, "Security+ 1.0 controls: buzzer warning; shared UART owner; no Stop or lock command");
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
@@ -85,6 +94,10 @@ void OpenGarageComponent::setup() {
   // HARDWARE priority precedes web OTA's AFTER_WIFI setup, so this guard is first.
   base->add_handler(new UpdateGuard(&update_gate_));
 #endif
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  thresholds_ready_ = thresholds_loaded_;
+  publish_thresholds_();
+#endif
 }
 
 void OpenGarageComponent::loop() {
@@ -113,19 +126,24 @@ void OpenGarageComponent::loop() {
       publish_binary(capability_sensor_, capability);
       if (capability != hardware_v23_) ESP_LOGW(TAG, "Capability strap differs from selected hardware profile");
 #ifdef USE_OPENGARAGE_SECPLUS1
-      if (hardware_v23_ && capability && !secplus1_stopped_) {
+      if (secplus1_selected_() && hardware_v23_ && capability && !secplus1_stopped_) {
+#ifdef USE_OPENGARAGE_UNIFIED
+        secplus1_.start(secplus1_rx_pin_, secplus1_tx_pin_, now,
+                       active_settings_.panel == PanelEmulation::AUTOMATIC);
+#else
         secplus1_.start(secplus1_rx_pin_, secplus1_tx_pin_, now);
+#endif
         ESP_LOGI(TAG, "Security+ 1.0 receiver started: %s", secplus1_.started() ? "YES" : "NO");
-      } else ESP_LOGW(TAG, "Security+ 1.0 receiver inhibited: hardware mismatch or update in progress");
+      } else if (secplus1_selected_()) ESP_LOGW(TAG, "Security+ 1.0 receiver inhibited: hardware mismatch or update in progress");
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS2_RX
-      if (hardware_v23_ && capability && secplus2_rx_pin_ != nullptr) {
+      if (secplus2_selected_() && hardware_v23_ && capability && secplus2_rx_pin_ != nullptr) {
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
         if (!secplus2_stopped_) secplus2_.start_queries(secplus2_rx_pin_, secplus2_tx_pin_, secplus2_client_, now);
 #else
         secplus2_.start(secplus2_rx_pin_->get_pin());
 #endif
-      } else {
+      } else if (secplus2_selected_()) {
         ESP_LOGW(TAG, "Security+ RX hardware mismatch: receiver not initialized");
       }
 #endif
@@ -137,20 +155,30 @@ void OpenGarageComponent::loop() {
     }
   }
 #ifdef USE_OPENGARAGE_SECPLUS1
-  secplus1_.loop(now);
-#elif defined(USE_OPENGARAGE_SECPLUS2_RX)
-  secplus2_.loop(now);  // Bounded receive pump, before sensing and entity publication.
+  if (secplus1_selected_()) secplus1_.loop(now);
+#endif
+#ifdef USE_OPENGARAGE_SECPLUS2_RX
+  if (secplus2_selected_()) secplus2_.loop(now);  // Only the active UART is serviced.
 #endif
   if (config_.distance_enabled) distance_.loop(now);
 #ifdef USE_OPENGARAGE_CONTROL
   service_control_(now);
 #endif
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
   light_intent_.tick(now, light_enabled_());
+  lock_intent_.tick(now, lock_enabled_());
+  if (opener_light_ && unified_port_.security()) opener_light_->observe(unified_port_.light());
+  if (remote_lock_ && unified_port_.security()) remote_lock_->observe(unified_port_.locked());
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
+  light_intent_.tick(now, light_enabled_());
+  lock_intent_.tick(now, lock_enabled_());
   if (opener_light_) opener_light_->observe(secplus1_.receiver().light());
+  if (remote_lock_) remote_lock_->observe(secplus1_.receiver().locked());
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   light_intent_.tick(now, light_enabled_());
+  lock_intent_.tick(now, lock_enabled_());
   if (opener_light_) opener_light_->observe(secplus2_.receiver().light());
+  if (remote_lock_) remote_lock_->observe(secplus2_.receiver().locked());
 #endif
   if (uint32_t(now - publish_ms_) >= 1000) { publish_ms_ = now; publish_(now); }
   status_led_.loop(now);
@@ -162,12 +190,14 @@ void OpenGarageComponent::publish_(uint32_t now) {
   const auto contact = contact_valid_ ? std::optional<bool>(contact_stable_) : std::nullopt;
   DoorState protocol_state = DoorState::UNKNOWN;
 #ifdef USE_OPENGARAGE_SECPLUS1
+  if (secplus1_selected_()) {
   auto &receiver = secplus1_.receiver();
   receiver.tick(now);
   protocol_state = receiver.door();
   publish_binary(secplus1_binary_[0], receiver.valid());
   publish_binary(secplus1_binary_[1], receiver.light());
   publish_binary(secplus1_binary_[2], receiver.locked());
+  publish_binary(secplus1_binary_[3], receiver.obstructed());
   publish_text(secplus1_panel_text_, secplus1_panel_name(secplus1_.panel_state()));
   publish_binary(secplus1_rx_level_, secplus1_.rx_high());
   if (secplus1_trace_text_) {
@@ -192,13 +222,17 @@ void OpenGarageComponent::publish_(uint32_t now) {
     auto *sensor = secplus1_diagnostics_[i];
     if (sensor && (!sensor->has_state() || sensor->state != values[i])) sensor->publish_state(values[i]);
   }
-#elif defined(USE_OPENGARAGE_SECPLUS2_RX)
+  }
+#endif
+#ifdef USE_OPENGARAGE_SECPLUS2_RX
+  if (secplus2_selected_()) {
   auto &receiver = secplus2_.receiver();
   receiver.tick(now);
   protocol_state = receiver.door();
   publish_binary(secplus2_binary_[0], receiver.valid());
   publish_binary(secplus2_binary_[1], receiver.light());
   publish_binary(secplus2_binary_[2], receiver.locked());
+  publish_binary(secplus2_binary_[3], receiver.obstructed());
   const auto &stats = receiver.stats();
   const uint32_t values[] = {stats.bytes, stats.frames, stats.status_frames, stats.decode_errors,
       stats.partial_timeouts, stats.overflows, stats.unknown_commands, stats.semantic_errors,
@@ -207,9 +241,11 @@ void OpenGarageComponent::publish_(uint32_t now) {
     auto *sensor = secplus2_diagnostics_[i];
     if (sensor && (!sensor->has_state() || sensor->state != values[i])) sensor->publish_state(values[i]);
   }
+  }
 #endif
   const auto state = resolve_state(config_, distance, contact, protocol_state);
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
+  if (secplus2_selected_()) {
   const auto &session = secplus2_.session();
   publish_text(secplus2_sync_text_, session.state_name());
   char counter[11]; std::snprintf(counter, sizeof(counter), "%lu", static_cast<unsigned long>(session.rolling()));
@@ -225,6 +261,7 @@ void OpenGarageComponent::publish_(uint32_t now) {
   for (size_t i = 0; i < secplus2_tx_diagnostics_.size(); ++i) {
     auto *s = secplus2_tx_diagnostics_[i];
     if (s && (!s->has_state() || s->state != tx_values[i])) s->publish_state(tx_values[i]);
+  }
   }
 #endif
   if (distance_sensor_) distance_sensor_->publish_state(distance ? float(*distance) : NAN);
@@ -249,21 +286,25 @@ void OpenGarageComponent::publish_(uint32_t now) {
 }
 
 void OpenGarageComponent::on_shutdown() {
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  thresholds_stopped_ = true;
+#endif
 #ifdef USE_OPENGARAGE_SECPLUS1
   secplus1_stopped_ = true;
-  secplus1_.stop();
+  if (secplus1_selected_()) secplus1_.stop();
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS2_RX
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
   secplus2_stopped_ = true;
 #endif
-  secplus2_.stop();
+  if (secplus2_selected_()) secplus2_.stop();
 #endif
 #ifdef USE_OPENGARAGE_CONTROL
   action_controller_.shutdown();
 #endif
 #if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   light_intent_.cancel();
+  lock_intent_.cancel();
 #endif
   if (config_.distance_enabled) distance_.shutdown();
   status_led_.stop();
@@ -271,7 +312,10 @@ void OpenGarageComponent::on_shutdown() {
 
 void OpenGarageComponent::dump_config() {
 #ifdef USE_OPENGARAGE_CONTROL
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  ESP_LOGCONFIG(TAG, "Unified v2.3: %s; exactly one GPIO5/15 owner; GPIO13 stock buzzer warning",
+                protocol_name(active_settings_.protocol));
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   ESP_LOGCONFIG(TAG, "Security+ 1.0 control: shared GPIO5/15 UART; GPIO13 warning; no dry-contact output");
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   ESP_LOGCONFIG(TAG, "Security+ 2.0 control: shared GPIO5/15 UART/counter; GPIO13 warning; no dry-contact output");
@@ -305,7 +349,13 @@ void OpenGarageComponent::service_control_(uint32_t now) {
   const auto contact = contact_valid_ ? std::optional<bool>(contact_stable_) : std::nullopt;
   DoorState protocol = DoorState::UNKNOWN;
   bool hardware_ok = identification_done_ && control_hardware_ok_;
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  unified_port_.tick(now);
+  protocol = unified_port_.door();
+  hardware_ok = hardware_ok && !configuration_stopped_ &&
+      active_settings_.protocol != OpenerProtocol::UNCONFIGURED &&
+      (!unified_port_.security() || unified_port_.controls_available());
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   secplus1_.receiver().tick(now);
   protocol = secplus1_.receiver().door();
   hardware_ok = hardware_ok && secplus1_.controls_available();
@@ -324,25 +374,48 @@ void OpenGarageComponent::publish_control_() {
   // Do not republish unchanged diagnostics on every main-loop iteration.
   if (armed_sensor_ && (!armed_sensor_->has_state() || armed_sensor_->state != action_controller_.armed()))
     armed_sensor_->publish_state(action_controller_.armed());
-#if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
-  publish_text(phase_text_, action_controller_.phase() == ActionPhase::PULSING ? "Releasing protocol button" :
-      action_phase_name(action_controller_.phase()));
-  publish_text(reason_text_, action_controller_.reason() == ActionReason::DISPATCHED ? "Door command sent" :
-      action_reason_name(action_controller_.reason()));
+#ifdef USE_OPENGARAGE_UNIFIED
+  const bool protocol = unified_port_.security();
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
+  constexpr bool protocol = true;
 #else
-  publish_text(phase_text_, action_phase_name(action_controller_.phase()));
-  publish_text(reason_text_, action_reason_name(action_controller_.reason()));
+  constexpr bool protocol = false;
 #endif
+  const char *phase = update_status_.phase(action_controller_.phase(), protocol);
+  const char *reason = update_status_.reason(action_controller_.reason(), protocol);
+#ifdef USE_OPENGARAGE_UNIFIED
+  if (!update_gate_.open() && !unified_ota_latched_ && configuration_stopped_) {
+    phase = "Configuration change; controls stopped";
+    reason = settings_error_ ? "Settings save failed; check configuration after restart" : "Settings saved; restart device to apply";
+  } else if (!update_gate_.open() && !unified_ota_latched_ && active_settings_.protocol == OpenerProtocol::UNCONFIGURED) {
+    reason = "Select Opener Protocol, then restart device";
+  }
+#endif
+  publish_text(phase_text_, phase);
+  publish_text(reason_text_, reason);
   if (pulse_count_sensor_ && (!pulse_count_sensor_->has_state() || pulse_count_sensor_->state != action_controller_.dispatches()))
     pulse_count_sensor_->publish_state(action_controller_.dispatches());
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  publish_text(light_reason_, unified_port_.security() ? light_intent_.reason() : "Unavailable for selected protocol");
+  publish_text(lock_reason_, unified_port_.security() ? lock_intent_.reason() : "Unavailable for selected protocol");
+  if (light_count_ && (!light_count_->has_state() || light_count_->state != unified_port_.light_commands()))
+    light_count_->publish_state(unified_port_.light_commands());
+  if (lock_count_ && (!lock_count_->has_state() || lock_count_->state != unified_port_.lock_commands()))
+    lock_count_->publish_state(unified_port_.lock_commands());
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   publish_text(light_reason_, light_intent_.reason());
   if (light_count_ && (!light_count_->has_state() || light_count_->state != secplus1_.light_commands()))
     light_count_->publish_state(secplus1_.light_commands());
+  publish_text(lock_reason_, lock_intent_.reason());
+  if (lock_count_ && (!lock_count_->has_state() || lock_count_->state != secplus1_.lock_commands()))
+    lock_count_->publish_state(secplus1_.lock_commands());
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   publish_text(light_reason_, light_intent_.reason());
   if (light_count_ && (!light_count_->has_state() || light_count_->state != secplus2_.light_commands()))
     light_count_->publish_state(secplus2_.light_commands());
+  publish_text(lock_reason_, lock_intent_.reason());
+  if (lock_count_ && (!lock_count_->has_state() || lock_count_->state != secplus2_.lock_commands()))
+    lock_count_->publish_state(secplus2_.lock_commands());
 #endif
 }
 
@@ -352,6 +425,7 @@ void OpenGarageComponent::request_control(bool cancel) {
     action_controller_.cancel(now);  // Never tick a due warning before Cancel.
 #if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
     light_intent_.cancel();
+    lock_intent_.cancel();
 #endif
   }
   else {
@@ -361,23 +435,44 @@ void OpenGarageComponent::request_control(bool cancel) {
   publish_control_();
 }
 
-void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota::OTAComponent *) {
+void OpenGarageComponent::on_ota_global_state(ota::OTAState state, float, uint8_t, ota::OTAComponent *) {
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  thresholds_stopped_ = true;
+#endif
   // An attempted/failed OTA does not re-arm; require a reboot and deliberate local arming.
   action_controller_.shutdown();
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  unified_ota_latched_ = true;
+  stop_unified_();
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   light_intent_.cancel();
+  lock_intent_.cancel();
   secplus1_stopped_ = true;
   secplus1_.stop();
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   light_intent_.cancel();
+  lock_intent_.cancel();
   secplus2_stopped_ = true;
   secplus2_.stop();
 #endif
+  // Best-effort UI feedback; these callbacks do not define the upload gate's
+  // admission boundary. Never suggest a restart while OTA reports progress.
+  switch (state) {
+    case ota::OTA_STARTED:
+    case ota::OTA_IN_PROGRESS: update_status_.started(); break;
+    case ota::OTA_ERROR:
+    case ota::OTA_ABORT: update_status_.failed(); break;
+    case ota::OTA_COMPLETED: update_status_.completed(); break;
+  }
+  publish_control_();
 }
 #endif
 
 #if defined(USE_OPENGARAGE_SECPLUS2_SYNC) && !defined(USE_OPENGARAGE_CONTROL)
 void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota::OTAComponent *) {
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  thresholds_stopped_ = true;
+#endif
   secplus2_stopped_ = true;
   secplus2_.stop(); // Includes OTA before identification, failure, and completed uploads.
 }
@@ -385,6 +480,9 @@ void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota
 
 #if defined(USE_OPENGARAGE_SECPLUS1) && !defined(USE_OPENGARAGE_CONTROL)
 void OpenGarageComponent::on_ota_global_state(ota::OTAState, float, uint8_t, ota::OTAComponent *) {
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  thresholds_stopped_ = true;
+#endif
   // Even failed OTA leaves polling stopped until reboot. No mode changes or replay.
   secplus1_stopped_ = true;
   secplus1_.stop();
@@ -400,25 +498,33 @@ void OpenGarageComponent::request_door(DoorCommand command) {
 }
 
 void OpenGarageComponent::enter_update_mode() {
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  stop_unified_();
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   action_controller_.shutdown();
   light_intent_.cancel();
+  lock_intent_.cancel();
   secplus1_stopped_ = true;
   secplus1_.stop();
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   action_controller_.shutdown();
   light_intent_.cancel();
+  lock_intent_.cancel();
   secplus2_stopped_ = true;
   secplus2_.stop();
 #endif
   update_gate_.enter();  // Release/stop first, then open the browser gate; latched until reboot.
+  update_status_.prepare();
   publish_control_();
 }
 #endif
 
 #if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
-bool OpenGarageComponent::light_enabled_() const {
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+bool OpenGarageComponent::auxiliary_enabled_() const {
+#ifdef USE_OPENGARAGE_UNIFIED
+  return identification_done_ && control_hardware_ok_ && unified_port_.security() &&
+      !configuration_stopped_ && !secplus1_stopped_ && !secplus2_stopped_ &&
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   return identification_done_ && control_hardware_ok_ && !secplus1_stopped_ &&
 #else
   return identification_done_ && control_hardware_ok_ && !secplus2_stopped_ &&
@@ -426,9 +532,16 @@ bool OpenGarageComponent::light_enabled_() const {
       !update_gate_.open() && action_controller_.armed() && !action_controller_.pending() &&
       wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
 }
+bool OpenGarageComponent::light_enabled_() const { return auxiliary_enabled_() && !lock_intent_.waiting(); }
+bool OpenGarageComponent::lock_enabled_() const { return auxiliary_enabled_() && !light_intent_.waiting(); }
 void OpenGarageComponent::request_light(bool target) {
   // Do not advance a due door warning from a competing light callback.
   light_intent_.request(millis(), target, light_enabled_());
+  publish_control_();
+}
+void OpenGarageComponent::request_lock(bool target) {
+  // A lock request never advances a pending door warning or competes with light intent.
+  lock_intent_.request(millis(), target, lock_enabled_());
   publish_control_();
 }
 #endif

@@ -35,10 +35,12 @@ class Secplus2Transport {
   bool command_idle(uint32_t now) const;
   bool press_door(uint32_t now);
   bool set_light(uint32_t now, bool on);
+  bool set_lock(uint32_t now, bool locked);
   bool releasing() const { return release_pending_; }
   void cancel_press() { expedited_release_ = release_pending_; }
   uint32_t door_commands() const { return door_commands_; }
   uint32_t light_commands() const { return light_commands_; }
+  uint32_t lock_commands() const { return lock_commands_; }
 #endif
 #endif
  protected:
@@ -70,7 +72,7 @@ class Secplus2Transport {
   void emergency_release_();
   bool bus_idle_(uint32_t now) const;
   uint32_t pressed_ms_{0}, last_tx_ms_{0}, release_attempt_ms_{0};
-  uint32_t door_commands_{0}, light_commands_{0};
+  uint32_t door_commands_{0}, light_commands_{0}, lock_commands_{0};
   bool release_pending_{false}, release_open_{false}, expedited_release_{false};
   bool control_fault_{false}, tx_seen_{false}, refresh_status_{false};
 #endif

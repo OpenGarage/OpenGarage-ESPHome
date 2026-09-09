@@ -12,7 +12,7 @@
 namespace esphome::opengarage {
 class Secplus1Transport {
  public:
-  void start(InternalGPIOPin *rx, InternalGPIOPin *tx, uint32_t now);
+  void start(InternalGPIOPin *rx, InternalGPIOPin *tx, uint32_t now, bool emulate_if_needed = true);
   void loop(uint32_t now);
   void stop();
   bool started() const { return started_; }
@@ -27,17 +27,20 @@ class Secplus1Transport {
   bool command_idle(uint32_t now) const;
   bool press_door(uint32_t now);
   bool press_light(uint32_t now);
+  bool set_lock(uint32_t now, bool locked);
   bool releasing() const { return releases_left_ != 0; }
   // After a press has gone out, cancel can only expedite its release, never undo it.
   void cancel_press() { expedited_release_ = releases_left_ != 0; }
   uint32_t door_commands() const { return door_commands_; }
   uint32_t light_commands() const { return light_commands_; }
+  uint32_t lock_commands() const { return lock_commands_; }
  protected:
-  bool press_(uint8_t press, uint8_t release, uint32_t now, DoorState door, std::optional<bool> light);
+  bool press_(uint8_t press, uint8_t release, uint32_t now, DoorState door, std::optional<bool> binary);
   void service_release_(uint32_t now, bool backlog);
   void emergency_release_();
   Ticker force_low_;
   uint32_t pressed_ms_{0}, release_ms_{0}, last_tx_ms_{0}, door_commands_{0}, light_commands_{0};
+  uint32_t lock_commands_{0};
   uint8_t release_byte_{0}, releases_left_{0};
   bool expedited_release_{false}, control_fault_{false}, tx_seen_{false};
 #endif

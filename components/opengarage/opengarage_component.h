@@ -13,13 +13,25 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#ifdef USE_OPENGARAGE_THRESHOLDS
+#include "threshold_number.h"
+#include "esphome/core/preferences.h"
+#endif
 #ifdef USE_OPENGARAGE_CONTROL
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#include "update_status.h"
+#ifdef USE_OPENGARAGE_UNIFIED
+#include "unified_port.h"
+#include "protocol_select.h"
+#include "remote_lock.h"
+#include "esphome/core/preferences.h"
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
 #include "secplus1_outputs.h"
 #include "secplus1_controls.h"
+#include "remote_lock.h"
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
 #include "secplus2_outputs.h"
 #include "secplus2_controls.h"
+#include "remote_lock.h"
 #else
 #include "pulse_outputs.h"
 #endif
@@ -44,6 +56,13 @@ class OpenGarageComponent : public Component
 #endif
 #if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
     , public OpenerLightCommands
+    , public RemoteLockCommands
+#endif
+#ifdef USE_OPENGARAGE_UNIFIED
+    , public ProtocolSettingCommands
+#endif
+#ifdef USE_OPENGARAGE_THRESHOLDS
+    , public ThresholdCommands
 #endif
 {
  public:
@@ -59,6 +78,13 @@ class OpenGarageComponent : public Component
   void set_distance_enabled(bool value) { config_.distance_enabled = value; }
   void set_door_threshold(uint16_t value) { config_.door_threshold_cm = value; }
   void set_vehicle_threshold(uint16_t value) { config_.vehicle_threshold_cm = value; }
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  void load_threshold_settings();
+  void set_threshold_number(bool door, ThresholdNumber *value) {
+    (door ? door_threshold_number_ : vehicle_threshold_number_) = value;
+  }
+  void request_threshold(bool door, float value) override;
+#endif
   void set_distance_pins(InternalGPIOPin *trigger, InternalGPIOPin *echo) { distance_.set_pins(trigger, echo); }
   void set_distance_config(FilterMode mode, TimeoutPolicy policy, uint16_t margin, uint32_t stale, uint32_t interval) {
     distance_.configure(mode, policy, margin, stale, interval);
@@ -79,6 +105,23 @@ class OpenGarageComponent : public Component
   void set_door_text(text_sensor::TextSensor *value) { door_text_ = value; }
   void set_vehicle_text(text_sensor::TextSensor *value) { vehicle_text_ = value; }
   void set_family_text(text_sensor::TextSensor *value) { family_text_ = value; }
+#ifdef USE_OPENGARAGE_UNIFIED
+  // Codegen calls this before entity configuration and App.setup(), after the
+  // platform preference store exists. No I/O or control is started here.
+  void load_unified_settings(OpenerProtocol protocol, PanelEmulation panel);
+  void set_unified_pins(InternalGPIOPin *rx, InternalGPIOPin *tx) {
+    secplus1_rx_pin_ = secplus2_rx_pin_ = rx;
+    secplus1_tx_pin_ = secplus2_tx_pin_ = door_pin_ = tx;
+  }
+  void set_unified_client(uint32_t value) { secplus2_client_ = value; }
+  void set_protocol_select(ProtocolSelect *value) { protocol_select_ = value; }
+  void set_panel_select(ProtocolSelect *value) { panel_select_ = value; }
+  void set_configuration_text(text_sensor::TextSensor *value) { configuration_text_ = value; }
+  void request_setting(bool panel, size_t index) override;
+  uint32_t mode_entity_fields(uint32_t fields, uint8_t mask) const {
+    return fields | (protocol_exposes(active_settings_.protocol, mask) ? 0U : (1U << 24));
+  }
+#endif
 #ifdef USE_OPENGARAGE_SECPLUS1
   void set_secplus1_rx_pin(InternalGPIOPin *pin) { secplus1_rx_pin_ = pin; }
   void set_secplus1_tx_pin(InternalGPIOPin *pin) { secplus1_tx_pin_ = pin; }
@@ -131,7 +174,10 @@ class OpenGarageComponent : public Component
   void on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *component) override;
 #endif
 #if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  void set_cover(UnifiedCover *value) { cover_ = value; }
+  void set_light(UnifiedLight *value) { opener_light_ = value; }
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   void set_cover(Secplus1Cover *value) { cover_ = value; }
   void set_light(Secplus1Light *value) { opener_light_ = value; }
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
@@ -144,6 +190,10 @@ class OpenGarageComponent : public Component
   void set_light_reason(text_sensor::TextSensor *value) { light_reason_ = value; }
   void set_light_count(sensor::Sensor *value) { light_count_ = value; }
   void request_light(bool target) override;
+  void set_remote_lock(RemoteLock *value) { remote_lock_ = value; }
+  void set_lock_reason(text_sensor::TextSensor *value) { lock_reason_ = value; }
+  void set_lock_count(sensor::Sensor *value) { lock_count_ = value; }
+  void request_lock(bool target) override;
 #endif
   void set_state_valid_sensor(binary_sensor::BinarySensor *value) { state_valid_sensor_ = value; }
   void request_door(DoorCommand command) override;
@@ -153,6 +203,27 @@ class OpenGarageComponent : public Component
 
  protected:
   void publish_(uint32_t now);
+#ifdef USE_OPENGARAGE_THRESHOLDS
+  bool threshold_editable_(bool door) const;
+  void publish_thresholds_();
+  ESPPreferenceObject threshold_preference_;
+  ThresholdNumber *door_threshold_number_{nullptr}, *vehicle_threshold_number_{nullptr};
+  bool thresholds_loaded_{false}, thresholds_ready_{false}, thresholds_stopped_{false};
+#endif
+#ifdef USE_OPENGARAGE_UNIFIED
+  void stop_unified_();
+  void publish_settings_();
+  ESPPreferenceObject mode_preference_;
+  ProtocolSettings active_settings_, pending_settings_;
+  ProtocolSelect *protocol_select_{nullptr}, *panel_select_{nullptr};
+  text_sensor::TextSensor *configuration_text_{nullptr};
+  bool settings_loaded_{false}, configuration_stopped_{false}, settings_error_{false}, unified_ota_latched_{false};
+  bool secplus1_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS1; }
+  bool secplus2_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS2; }
+#else
+  bool secplus1_selected_() const { return true; }
+  bool secplus2_selected_() const { return true; }
+#endif
   ResolverConfig config_;
   DistanceSensor distance_;
   StatusLed status_led_;
@@ -170,7 +241,7 @@ class OpenGarageComponent : public Component
 #ifdef USE_OPENGARAGE_SECPLUS1
   Secplus1Transport secplus1_;
   InternalGPIOPin *secplus1_rx_pin_{nullptr}, *secplus1_tx_pin_{nullptr};
-  std::array<binary_sensor::BinarySensor *, 3> secplus1_binary_{};
+  std::array<binary_sensor::BinarySensor *, 4> secplus1_binary_{};
   std::array<sensor::Sensor *, 20> secplus1_diagnostics_{};
   text_sensor::TextSensor *secplus1_panel_text_{nullptr}, *secplus1_frame_text_{nullptr};
   text_sensor::TextSensor *secplus1_trace_text_{nullptr}, *secplus1_block_text_{nullptr};
@@ -180,7 +251,7 @@ class OpenGarageComponent : public Component
 #ifdef USE_OPENGARAGE_SECPLUS2_RX
   Secplus2Transport secplus2_;
   InternalGPIOPin *secplus2_rx_pin_{nullptr};
-  std::array<binary_sensor::BinarySensor *, 3> secplus2_binary_{};
+  std::array<binary_sensor::BinarySensor *, 4> secplus2_binary_{};
   std::array<sensor::Sensor *, 10> secplus2_diagnostics_{};
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
@@ -194,13 +265,21 @@ class OpenGarageComponent : public Component
 #ifdef USE_OPENGARAGE_CONTROL
   void service_control_(uint32_t now);
   void publish_control_();
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  UnifiedPort unified_port_{secplus1_, secplus2_};
+  UnifiedOutputs pulse_outputs_{secplus1_, secplus2_};
+  UnifiedLightIntent light_intent_{unified_port_};
+  RemoteLockIntent<UnifiedPort> lock_intent_{unified_port_};
+  UnifiedLight *opener_light_{nullptr};
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   Secplus1Outputs pulse_outputs_{secplus1_};
   Secplus1LightIntent light_intent_{secplus1_};
+  RemoteLockIntent<Secplus1Transport> lock_intent_{secplus1_};
   Secplus1Light *opener_light_{nullptr};
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   Secplus2Outputs pulse_outputs_{secplus2_};
   Secplus2LightIntent light_intent_{secplus2_};
+  RemoteLockIntent<Secplus2Transport> lock_intent_{secplus2_};
   Secplus2Light *opener_light_{nullptr};
 #else
   PulseOutputs pulse_outputs_;
@@ -208,9 +287,15 @@ class OpenGarageComponent : public Component
 #if defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   text_sensor::TextSensor *light_reason_{nullptr};
   sensor::Sensor *light_count_{nullptr};
+  RemoteLock *remote_lock_{nullptr};
+  text_sensor::TextSensor *lock_reason_{nullptr};
+  sensor::Sensor *lock_count_{nullptr};
+  bool auxiliary_enabled_() const;
   bool light_enabled_() const;
+  bool lock_enabled_() const;
 #endif
   ActionController action_controller_{pulse_outputs_};
+  UpdateStatus update_status_;
   ControlButton control_button_;
   ActionConfig control_config_;
   InternalGPIOPin *door_pin_{nullptr}, *buzzer_pin_{nullptr};
@@ -221,7 +306,9 @@ class OpenGarageComponent : public Component
   sensor::Sensor *pulse_count_sensor_{nullptr};
 #endif
 #if defined(USE_OPENGARAGE_PULSE_MVP) || defined(USE_OPENGARAGE_SECPLUS1_CONTROL) || defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
-#ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
+#ifdef USE_OPENGARAGE_UNIFIED
+  UnifiedCover *cover_{nullptr};
+#elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
   Secplus1Cover *cover_{nullptr};
 #elif defined(USE_OPENGARAGE_SECPLUS2_CONTROL)
   Secplus2Cover *cover_{nullptr};

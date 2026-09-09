@@ -74,6 +74,7 @@ class Secplus2Receiver {
     door_ = door;
     light_ = (data & (1UL << 25)) != 0;
     lock_ = (data & (1UL << 24)) != 0;
+    obstruction_ = (data & (1UL << 22)) == 0;  // Stock's active-low STATUS bit.
     status_seen_ = true;
     last_status_ms_ = now;
     increment_(stats_.status_frames);
@@ -88,6 +89,7 @@ class Secplus2Receiver {
   DoorState door() const { return door_; }
   std::optional<bool> light() const { return light_; }
   std::optional<bool> locked() const { return lock_; }
+  std::optional<bool> obstructed() const { return obstruction_; }
   const Secplus2RxStats &stats() const { return stats_; }
   size_t partial_size() const { return used_; }
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
@@ -114,6 +116,7 @@ class Secplus2Receiver {
     door_ = DoorState::UNKNOWN;
     light_.reset();
     lock_.reset();
+    obstruction_.reset();
   }
   void resync_() {
     // Failed candidate: retain the next complete prefix, otherwise only a suffix
@@ -134,7 +137,7 @@ class Secplus2Receiver {
   uint32_t last_byte_ms_{0}, last_status_ms_{0}, status_timeout_ms_{360000};
   bool status_seen_{false};
   DoorState door_{DoorState::UNKNOWN};
-  std::optional<bool> light_, lock_;
+  std::optional<bool> light_, lock_, obstruction_;
   Secplus2RxStats stats_;
 #ifdef USE_OPENGARAGE_SECPLUS2_SYNC
   uint32_t own_client_{0}, openings_frames_{0};

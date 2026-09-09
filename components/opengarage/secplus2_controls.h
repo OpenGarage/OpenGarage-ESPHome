@@ -3,6 +3,7 @@
 #include "esphome/core/defines.h"
 #ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
 #include "pulse_cover.h"
+#include "opener_light_commands.h"
 #include "secplus2_transport.h"
 #include "esphome/components/light/light_output.h"
 
@@ -28,9 +29,9 @@ class Secplus2Cover : public PulseCover {
 
 // One bounded ON/OFF light intent, not an action/retry queue. Revalidate the
 // reported baseline before writing; do not retry an unacknowledged command.
-class Secplus2LightIntent {
+template<class Port> class TargetLightIntent {
  public:
-  explicit Secplus2LightIntent(Secplus2Transport &port) : port_(port) {}
+  explicit TargetLightIntent(Port &port) : port_(port) {}
   bool request(uint32_t now, bool target, bool enabled) {
     port_.receiver().tick(now);
     if (!enabled || !port_.controls_available()) return reject_("Controls unavailable");
@@ -62,16 +63,13 @@ class Secplus2LightIntent {
   const char *reason() const { return reason_; }
  protected:
   bool reject_(const char *reason) { reason_ = reason; return false; }
-  Secplus2Transport &port_;
+  Port &port_;
   uint32_t requested_ms_{0}, sent_ms_{0};
   bool waiting_{false}, target_{false}, cooldown_{false};
   const char *reason_{"No light command"};
 };
 
-class OpenerLightCommands {
- public:
-  virtual void request_light(bool target) = 0;
-};
+using Secplus2LightIntent = TargetLightIntent<Secplus2Transport>;
 class Secplus2Light : public light::LightOutput {
  public:
   explicit Secplus2Light(OpenerLightCommands *parent) : parent_(parent) {}

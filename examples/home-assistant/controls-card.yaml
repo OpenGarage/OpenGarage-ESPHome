@@ -1,0 +1,19 @@
+# Home Assistant dashboard card, NOT an ESPHome firmware configuration.
+# Replace all five replace_me_* entity IDs with entities from the SAME device.
+# See ../../docs/dashboard.md for setup and pulse-mode adjustments.
+type: entities
+title: OpenGarage — Controls
+show_header_toggle: false
+color: state
+entities:
+  - entity: cover.replace_me_garage_door
+    name: Garage Door
+  - entity: button.replace_me_request_door_toggle
+    name: Request Door Toggle
+  - entity: button.replace_me_cancel_pending_action
+    name: Cancel Pending Action
+  - type: divider
+  - entity: light.replace_me_opener_light
+    name: Opener Light
+  - entity: lock.replace_me_remote_lock
+    name: Remote Lock

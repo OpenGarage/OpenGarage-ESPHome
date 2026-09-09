@@ -1,0 +1,7 @@
+# Runtime calibration, stored on OG; YAML threshold values are first-boot defaults.
+opengarage:
+  threshold_controls:
+    door:
+      name: Door Open Distance Threshold
+    vehicle:
+      name: Vehicle Distance Threshold

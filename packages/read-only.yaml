@@ -1,3 +1,6 @@
+substitutions:
+  component_source: ../components
+
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
@@ -20,8 +23,8 @@ esp8266:
 external_components:
   - source:
       type: local
-      # Entrypoint YAML lives in firmware/ or tests/, both one level below root.
-      path: ../components
+      # Personal devices/<name>/device.yaml overrides this relative source path.
+      path: ${component_source}
     components: [opengarage, opengarage_secplus_codec]
 
 logger:

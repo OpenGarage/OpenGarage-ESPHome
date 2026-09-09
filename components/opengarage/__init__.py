@@ -4,23 +4,28 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import pins
-from esphome.components import binary_sensor, sensor, text_sensor, button, cover, light, ota
+from esphome.components import binary_sensor, sensor, text_sensor, button, cover, light, lock, ota, select, number
 from esphome.components.esp8266.const import require_waveform
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, __version__ as ESPHOME_VERSION
 
 def AUTO_LOAD(config):
     components = ["sensor", "binary_sensor", "text_sensor"]
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
         components.append("button")
-    if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control")):
+    if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
         components += ["cover", "web_server_base"]
-    if "secplus1_control" in config or "secplus2_control" in config:
-        components.append("light")
-    if "dev_secplus2_rx" in config:
+    if "secplus1_control" in config or "secplus2_control" in config or "unified_control" in config:
+        components += ["light", "lock"]
+    if "dev_secplus2_rx" in config or "unified_control" in config:
         components.append("opengarage_secplus_codec")
+    if "unified_control" in config:
+        components.append("select")
+    if "threshold_controls" in config:
+        components.append("number")
     return components
 DEPENDENCIES = ["esp8266"]
 MULTI_CONF = False
+MAX_THRESHOLD_CM = 450  # Keep in sync with ThresholdSettings::MAX_CM.
 
 ns = cg.esphome_ns.namespace("opengarage")
 OpenGarageComponent = ns.class_("OpenGarageComponent", cg.Component)
@@ -30,6 +35,13 @@ Secplus1Cover = ns.class_("Secplus1Cover", cover.Cover)
 Secplus1Light = ns.class_("Secplus1Light", light.LightOutput)
 Secplus2Cover = ns.class_("Secplus2Cover", cover.Cover)
 Secplus2Light = ns.class_("Secplus2Light", light.LightOutput)
+RemoteLock = ns.class_("RemoteLock", lock.Lock)
+UnifiedCover = ns.class_("UnifiedCover", cover.Cover)
+UnifiedLight = ns.class_("UnifiedLight", light.LightOutput)
+ProtocolSelect = ns.class_("ProtocolSelect", select.Select)
+ThresholdNumber = ns.class_("ThresholdNumber", number.Number)
+OpenerProtocol = ns.enum("OpenerProtocol", is_class=True)
+PanelEmulation = ns.enum("PanelEmulation", is_class=True)
 UpdateModeButton = ns.class_("UpdateModeButton", button.Button)
 StateSource = ns.enum("StateSource", is_class=True)
 Mounting = ns.enum("Mounting", is_class=True)
@@ -69,6 +81,24 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
+    if "threshold_controls" in value:
+        if not any(key in value for key in ("pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
+            raise cv.Invalid("Threshold controls require a production control profile with OTA lifecycle support")
+        thresholds = value["threshold_controls"]
+        if not value["distance_enabled"] or source in ("contact", "protocol"):
+            thresholds["door"]["internal"] = True
+        if not value["distance_enabled"] or value["mounting"] == "side":
+            thresholds["vehicle"]["internal"] = True
+    if "unified_control" in value:
+        if ESPHOME_VERSION != "2026.8.2":
+            raise cv.Invalid("Unified startup entity exposure is audited for ESPHome 2026.8.2; re-verify before upgrading")
+        if value["hardware"] != "v2_3":
+            raise cv.Invalid("Unified control requires v2_3 hardware")
+        if any(key in value for key in ("dev_pulse_control", "pulse_control", "dev_secplus1",
+                                       "secplus1_control", "dev_secplus2_rx", "dev_secplus2_sync", "secplus2_control")):
+            raise cv.Invalid("Unified control exclusively owns its pulse and Security+ backends")
+        if source == "protocol" or "door_state" not in value:
+            raise cv.Invalid("Unified control requires a non-protocol state_source for None mode and door_state text")
     if "secplus2_control" in value:
         if "dev_secplus2_sync" not in value:
             raise cv.Invalid("Security+ 2.0 controls require explicit dev_secplus2_sync ownership")
@@ -171,6 +201,7 @@ SECPLUS2_RX_SCHEMA = cv.Schema({
     cv.Required("status_valid"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
     cv.Optional("light_state"): binary_sensor.binary_sensor_schema(),
     cv.Optional("lock_state"): binary_sensor.binary_sensor_schema(),
+    cv.Optional("obstruction"): binary_sensor.binary_sensor_schema(device_class="problem", icon="mdi:garage-alert"),
     **{cv.Optional(key): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic",
           state_class="measurement" if key in ("rx_high_water", "max_service_time") else "total_increasing",
           **({"unit_of_measurement": "µs"} if key == "max_service_time" else {})) for key in SECPLUS2_COUNTERS},
@@ -214,6 +245,7 @@ SECPLUS1_SCHEMA = cv.All(_secplus1_pins, cv.Schema({
     cv.Optional("rx_pin_high"): binary_sensor.binary_sensor_schema(entity_category="diagnostic"),
     cv.Optional("light_state"): binary_sensor.binary_sensor_schema(),
     cv.Optional("lock_state"): binary_sensor.binary_sensor_schema(),
+    cv.Optional("obstruction"): binary_sensor.binary_sensor_schema(device_class="problem", icon="mdi:garage-alert"),
     **{cv.Optional(key): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic",
           state_class="measurement" if key in ("rx_high_water", "max_service_time") else "total_increasing",
           **({"unit_of_measurement": "µs"} if key == "max_service_time" else {})) for key in SECPLUS1_COUNTERS},
@@ -227,6 +259,9 @@ def _light_options(value):
 
 
 SECPLUS1_CONTROL_SCHEMA = cv.Schema({
+    cv.Optional("remote_lock"): lock.lock_schema(RemoteLock, icon="mdi:remote-off"),
+    cv.Optional("lock_action_reason"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("lock_command_count"): sensor.sensor_schema(accuracy_decimals=0, state_class="total_increasing", entity_category="diagnostic"),
     cv.Required("cover"): cover.cover_schema(Secplus1Cover, device_class="garage"),
     cv.Required("light"): cv.All(_light_options, light.light_schema(
         Secplus1Light, light.LightType.BINARY, default_restore_mode="ALWAYS_OFF")),
@@ -252,6 +287,45 @@ SECPLUS2_CONTROL_SCHEMA = SECPLUS1_CONTROL_SCHEMA.extend({
         Secplus2Light, light.LightType.BINARY, default_restore_mode="ALWAYS_OFF")),
 })
 
+UNIFIED_CONTROL_SCHEMA = SECPLUS2_CONTROL_SCHEMA.extend({
+    cv.Required("cover"): cover.cover_schema(UnifiedCover, device_class="garage"),
+    cv.Required("light"): cv.All(_light_options, light.light_schema(
+        UnifiedLight, light.LightType.BINARY, default_restore_mode="ALWAYS_OFF")),
+    cv.Required("protocol"): select.select_schema(ProtocolSelect, entity_category="config"),
+    cv.Required("panel_emulation"): select.select_schema(ProtocolSelect, entity_category="config"),
+    cv.Required("configuration_state"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("initial_protocol", default="unconfigured"): cv.enum({
+        "unconfigured": OpenerProtocol.UNCONFIGURED, "none": OpenerProtocol.PULSE,
+        "secplus1": OpenerProtocol.SECPLUS1, "secplus2": OpenerProtocol.SECPLUS2}, lower=True),
+    cv.Optional("initial_panel_emulation", default="automatic"): cv.enum({
+        "automatic": PanelEmulation.AUTOMATIC, "disabled": PanelEmulation.DISABLED}, lower=True),
+    cv.Optional("rx_pin", default=5): _fixed_pin(5, "input"),
+    cv.Optional("tx_pin", default=15): _fixed_pin(15, "output"),
+    cv.Optional("pulse_time", default="1s"): _milliseconds(100, 1000),
+    cv.Required("client_id"): cv.int_range(min=1, max=0xFFFFFFFF),
+    cv.Optional("status_timeout", default="15s"): _milliseconds(10000, 60000),
+    cv.Required("light_state"): binary_sensor.binary_sensor_schema(),
+    cv.Required("obstruction"): binary_sensor.binary_sensor_schema(device_class="problem", icon="mdi:garage-alert"),
+    cv.Required("panel_state"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("sync_state"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Required("rolling_code"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+    cv.Optional("openings"): sensor.sensor_schema(accuracy_decimals=0, entity_category="diagnostic"),
+})
+
+def _threshold_number_options(value):
+    if value["unit_of_measurement"] != "cm":
+        raise cv.Invalid("OpenGarage thresholds use centimeters")
+    if any(key in value for key in ("on_value", "on_value_range")):
+        raise cv.Invalid("Threshold entities cannot attach local value automations")
+    return value
+
+
+THRESHOLD_NUMBER_SCHEMA = cv.All(number.number_schema(
+    ThresholdNumber, entity_category="config", device_class="distance",
+    unit_of_measurement="cm", icon="mdi:arrow-expand-vertical").extend({
+        cv.Optional("mode", default="BOX"): cv.enum({"BOX": number.NumberMode.NUMBER_MODE_BOX}, upper=True),
+    }), _threshold_number_options)
+
 CONFIG_SCHEMA = cv.All(
     cv.only_on(["esp8266"]), _add_pins,
     cv.Schema({
@@ -264,13 +338,18 @@ CONFIG_SCHEMA = cv.All(
         cv.Optional("dev_secplus1"): SECPLUS1_SCHEMA,
         cv.Optional("secplus1_control"): SECPLUS1_CONTROL_SCHEMA,
         cv.Optional("secplus2_control"): SECPLUS2_CONTROL_SCHEMA,
+        cv.Optional("unified_control"): UNIFIED_CONTROL_SCHEMA,
         cv.Optional("state_source", default="distance"): cv.enum(SOURCES, lower=True),
         cv.Optional("mounting", default="ceiling"): cv.enum(MOUNTINGS, lower=True),
         cv.Optional("contact_type", default="none"): cv.enum(CONTACTS, lower=True),
         cv.Optional("distance_enabled", default=True): cv.boolean,
         cv.Optional("status_led_enabled", default=False): cv.boolean,
-        cv.Optional("door_threshold", default=50): cv.int_range(min=1, max=500),
-        cv.Optional("vehicle_threshold", default=150): cv.int_range(min=0, max=500),
+        cv.Optional("door_threshold", default=50): cv.int_range(min=1, max=MAX_THRESHOLD_CM),
+        cv.Optional("vehicle_threshold", default=150): cv.int_range(min=0, max=MAX_THRESHOLD_CM),
+        cv.Optional("threshold_controls"): cv.Schema({
+            cv.Required("door"): THRESHOLD_NUMBER_SCHEMA,
+            cv.Required("vehicle"): THRESHOLD_NUMBER_SCHEMA,
+        }),
         cv.Optional("filter", default="consensus"): cv.enum(FILTERS, lower=True),
         cv.Optional("timeout_policy", default="ignore"): cv.enum(TIMEOUTS, lower=True),
         cv.Optional("consensus_margin", default=10): cv.int_range(min=1, max=500),
@@ -312,6 +391,8 @@ def _final_validate(config):
         if (full.get("web_server") or has_web_ota) and not full.get("web_server", {}).get("auth"):
             raise cv.Invalid("Security+ 2.0 query prototype requires authenticated web_server")
     esp = full["esp8266"]
+    if "unified_control" in config and not esp["restore_from_flash"]:
+        raise cv.Invalid("Unified protocol selection requires restore_from_flash: true")
     if esp["board"] != "d1_mini" or esp["board_flash_mode"] != "dio" or esp["early_pin_init"]:
         raise cv.Invalid("OpenGarage M1 requires d1_mini, board_flash_mode: dio, early_pin_init: false")
     pio = full["esphome"].get("platformio_options", {})
@@ -321,7 +402,7 @@ def _final_validate(config):
         raise cv.Invalid("PlatformIO must not override DIO flash mode")
     if full.get("logger", {}).get("hardware_uart", "UART0") != "UART0":
         raise cv.Invalid("OpenGarage logger must use UART0; swapped UART0 and UART1 use reserved pins")
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
         if not full.get("api", {}).get("encryption"):
             raise cv.Invalid("M2 bench control requires encrypted native API")
         if not full.get("wifi") or not full.get("ota"):
@@ -332,7 +413,7 @@ def _final_validate(config):
             raise cv.Invalid("M2 bench control requires authenticated native OTA")
         if full.get("web_server") and not full["web_server"].get("auth"):
             raise cv.Invalid("M2 bench control requires authenticated web_server")
-        if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control")):
+        if any(key in config for key in ("pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
             if not full.get("web_server", {}).get("auth"):
                 raise cv.Invalid("Pulse MVP requires authenticated web_server for guarded browser recovery")
             if not any(item["platform"] == "web_server" for item in full["ota"]):
@@ -354,10 +435,60 @@ def _final_validate(config):
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 
+def _mode_exposure(parent, entity, config, mask):
+    """Configure exposure in generated setup(), before ANY component setup/discovery.
+
+    ESPHome 2026.8.2's codegen-only configure_entity_ API, not the deprecated
+    runtime set_internal(). Reapply the original metadata with a boot-mode bit;
+    preserve an explicit internal:true. App registration itself just stores the
+    pointer. Generated-source/real-core tests pin this ordering and packed layout.
+    """
+    fields = 0
+    for key, shift in (("_entity_dc_idx", 0), ("_entity_uom_idx", 8), ("_entity_icon_idx", 16),
+                       ("_entity_internal", 24), ("_entity_disabled_by_default", 25), ("_entity_category", 26)):
+        fields |= config.get(key, 0) << shift
+    cg.add(entity.configure_entity_(config["_entity_name"], config["_entity_object_id_hash"],
+                                   parent.mode_entity_fields(fields, mask)))
+
+
 async def to_code(config):
     cg.add_library("Ticker", None)  # Bundled with the pinned ESP8266 Arduino core.
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    unified = "unified_control" in config
+    if unified:
+        dev = config["unified_control"]
+        for define in ("USE_OPENGARAGE_UNIFIED", "USE_OPENGARAGE_SECPLUS1", "USE_OPENGARAGE_SECPLUS1_CONTROL",
+                       "USE_OPENGARAGE_SECPLUS2_RX", "USE_OPENGARAGE_SECPLUS2_SYNC", "USE_OPENGARAGE_SECPLUS2_CONTROL"):
+            cg.add_define(define)
+        cg.add_library("EspSoftwareSerial", None)
+        cg.add(var.load_unified_settings(dev["initial_protocol"], dev["initial_panel_emulation"]))
+        cg.add(var.set_unified_pins(await cg.gpio_pin_expression(dev["rx_pin"]),
+                                    await cg.gpio_pin_expression(dev["tx_pin"])))
+        cg.add(var.set_unified_client(dev["client_id"]))
+        cg.add(var.set_secplus1_timeout(dev["status_timeout"].total_milliseconds))
+        cg.add(var.set_secplus2_timeout(dev["status_timeout"].total_milliseconds))
+        cg.add(var.set_protocol_select(await select.new_select(dev["protocol"], var, False,
+            options=["Not configured", "None (dry contact)", "Security+ 1.0", "Security+ 2.0"])))
+        panel = await select.new_select(dev["panel_emulation"], var, True, options=["Automatic", "Disabled"])
+        cg.add(var.set_panel_select(panel))
+        _mode_exposure(var, panel, dev["panel_emulation"], 4)
+        cg.add(var.set_configuration_text(await text_sensor.new_text_sensor(dev["configuration_state"])))
+        for key, setter, mask in (("panel_state", "set_secplus1_panel_text", 4),
+                                  ("sync_state", "set_secplus2_sync_text", 8),
+                                  ("rolling_code", "set_secplus2_rolling_text", 8)):
+            entity = await text_sensor.new_text_sensor(dev[key])
+            cg.add(getattr(var, setter)(entity))
+            _mode_exposure(var, entity, dev[key], mask)
+        for key, index in (("light_state", 1), ("obstruction", 3)):
+            entity = await binary_sensor.new_binary_sensor(dev[key])
+            cg.add(var.set_secplus1_binary(index, entity))
+            cg.add(var.set_secplus2_binary(index, entity))
+            _mode_exposure(var, entity, dev[key], 12)
+        if "openings" in dev:
+            entity = await sensor.new_sensor(dev["openings"])
+            cg.add(var.set_secplus2_openings(entity))
+            _mode_exposure(var, entity, dev["openings"], 8)
     if "dev_secplus1" in config:
         dev = config["dev_secplus1"]
         cg.add_define("USE_OPENGARAGE_SECPLUS1")
@@ -377,7 +508,7 @@ async def to_code(config):
             cg.add(var.set_secplus1_block_text(await text_sensor.new_text_sensor(dev["tx_block_reason"])))
         if "rx_pin_high" in dev:
             cg.add(var.set_secplus1_rx_level(await binary_sensor.new_binary_sensor(dev["rx_pin_high"])))
-        for index, key in enumerate(("status_valid", "light_state", "lock_state")):
+        for index, key in enumerate(("status_valid", "light_state", "lock_state", "obstruction")):
             if key in dev:
                 cg.add(var.set_secplus1_binary(index, await binary_sensor.new_binary_sensor(dev[key])))
         for index, key in enumerate(SECPLUS1_COUNTERS):
@@ -389,7 +520,7 @@ async def to_code(config):
         cg.add_library("EspSoftwareSerial", None)  # 8.0.1 bundled with pinned Arduino 3.1.2.
         cg.add(var.set_secplus2_rx_pin(await cg.gpio_pin_expression(dev["rx_pin"])))
         cg.add(var.set_secplus2_timeout(dev["status_timeout"].total_milliseconds))
-        for index, key in enumerate(("status_valid", "light_state", "lock_state")):
+        for index, key in enumerate(("status_valid", "light_state", "lock_state", "obstruction")):
             if key in dev:
                 cg.add(var.set_secplus2_binary(index, await binary_sensor.new_binary_sensor(dev[key])))
         for index, key in enumerate(SECPLUS2_COUNTERS):
@@ -407,17 +538,18 @@ async def to_code(config):
         for index, key in enumerate(SECPLUS2_TX_COUNTERS):
             if key in dev:
                 cg.add(var.set_secplus2_tx_diagnostic(index, await sensor.new_sensor(dev[key])))
-    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control")):
+    if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
         bench = "dev_pulse_control" in config
         sec1_control = "secplus1_control" in config
         sec2_control = "secplus2_control" in config
-        dev = config["dev_pulse_control" if bench else "secplus1_control" if sec1_control else
+        dev = config["unified_control" if unified else "dev_pulse_control" if bench else "secplus1_control" if sec1_control else
                      "secplus2_control" if sec2_control else "pulse_control"]
         require_waveform()  # Arduino tone() must not resolve to ESPHome's no-op waveform stubs.
         cg.add_define("USE_OPENGARAGE_CONTROL")
         cg.add_define("USE_OPENGARAGE_M2_BENCH" if bench else
                       "USE_OPENGARAGE_SECPLUS1_CONTROL" if sec1_control else
-                      "USE_OPENGARAGE_SECPLUS2_CONTROL" if sec2_control else "USE_OPENGARAGE_PULSE_MVP")
+                      "USE_OPENGARAGE_SECPLUS2_CONTROL" if sec2_control else
+                      "USE_OPENGARAGE_UNIFIED" if unified else "USE_OPENGARAGE_PULSE_MVP")
         ota.request_ota_state_listeners()
         cg.add(var.set_bench_mode(bench))
         if bench:
@@ -426,16 +558,29 @@ async def to_code(config):
             cg.add(var.set_cover(await cover.new_cover(dev["cover"], var)))
             cg.add(var.set_state_valid_sensor(await binary_sensor.new_binary_sensor(dev["state_valid"])))
             await button.new_button(dev["firmware_update_mode"], var)
-        if sec1_control or sec2_control:
-            cg.add(var.set_control_pins(cg.nullptr, await cg.gpio_pin_expression(dev["buzzer_pin"])))
-            cg.add(var.set_control_timing(dev["warning_time"].total_milliseconds, 1000,
+        if sec1_control or sec2_control or unified:
+            door = await cg.get_variable(dev["tx_pin"][CONF_ID]) if unified else cg.nullptr
+            cg.add(var.set_control_pins(door, await cg.gpio_pin_expression(dev["buzzer_pin"])))
+            pulse_ms = dev["pulse_time"].total_milliseconds if unified else 1000
+            cg.add(var.set_control_timing(dev["warning_time"].total_milliseconds, pulse_ms,
                                          dev["lockout_time"].total_milliseconds))
             output = cg.new_Pvariable(dev["light"]["output_id"], var)
             await light.register_light(output, dev["light"])
             cg.add(var.set_light(output))
             cg.add(var.set_light_reason(await text_sensor.new_text_sensor(dev["light_action_reason"])))
             cg.add(var.set_light_count(await sensor.new_sensor(dev["light_command_count"])))
+            if "remote_lock" in dev:
+                cg.add(var.set_remote_lock(await lock.new_lock(dev["remote_lock"], var)))
+            if "lock_action_reason" in dev:
+                cg.add(var.set_lock_reason(await text_sensor.new_text_sensor(dev["lock_action_reason"])))
+            if "lock_command_count" in dev:
+                cg.add(var.set_lock_count(await sensor.new_sensor(dev["lock_command_count"])))
             cg.add(var.set_pulse_count_sensor(await sensor.new_sensor(dev["command_count"])))
+            if unified:
+                for key in ("light", "remote_lock", "light_action_reason", "light_command_count",
+                            "lock_action_reason", "lock_command_count"):
+                    if key in dev:
+                        _mode_exposure(var, await cg.get_variable(dev[key][CONF_ID]), dev[key], 12)
         else:
             cg.add(var.set_control_pins(await cg.gpio_pin_expression(dev["door_pin"]),
                                         await cg.gpio_pin_expression(dev["buzzer_pin"])))
@@ -456,6 +601,17 @@ async def to_code(config):
                         ("contact_type", "set_contact_type"), ("distance_enabled", "set_distance_enabled"),
                         ("door_threshold", "set_door_threshold"), ("vehicle_threshold", "set_vehicle_threshold")):
         cg.add(getattr(var, setter)(config[key]))
+    if "threshold_controls" in config:
+        cg.add_define("USE_OPENGARAGE_THRESHOLDS")
+        # Load after YAML defaults AND the existing unified-mode preference;
+        # before App.setup() and any sensor/control publication.
+        cg.add(var.load_threshold_settings())
+        for key, door in (("door", True), ("vehicle", False)):
+            conf = config["threshold_controls"][key]
+            entity = await number.new_number(conf, var, door, min_value=1 if door else 0, max_value=MAX_THRESHOLD_CM, step=1)
+            cg.add(var.set_threshold_number(door, entity))
+            if unified and door:
+                _mode_exposure(var, entity, conf, 2)  # None/pulse only; preserve static internal flags.
     for key in ("button_pin", "led_pin", "capability_pin", "contact_pin"):
         if key in config:
             cg.add(getattr(var, "set_" + key)(await cg.gpio_pin_expression(config[key])))

@@ -1,0 +1,21 @@
+# Home Assistant dashboard card, NOT an ESPHome firmware configuration.
+# Replace all six replace_me_* entity IDs with entities from the SAME device.
+# ESPHome text sensors also use the sensor.* entity domain in Home Assistant.
+# See ../../docs/dashboard.md for setup and pulse-mode adjustments.
+type: entities
+title: OpenGarage — Sensors
+show_header_toggle: false
+color: state
+entities:
+  - entity: binary_sensor.replace_me_door_open
+    name: Door Open
+  - entity: sensor.replace_me_door_state
+    name: Door State
+  - entity: sensor.replace_me_distance
+    name: Distance
+  - entity: binary_sensor.replace_me_vehicle_present
+    name: Vehicle Present
+  - entity: sensor.replace_me_vehicle_state
+    name: Vehicle State
+  - entity: binary_sensor.replace_me_opener_light_state
+    name: Opener Light State

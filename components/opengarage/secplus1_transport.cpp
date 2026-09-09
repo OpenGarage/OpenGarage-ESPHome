@@ -10,7 +10,7 @@ static void IRAM_ATTR secplus1_rx_wake() {
   // 50 ms without callbacks here starved panel initialization under RX activity.
   App.wake_loop_threadsafe();
 }
-void Secplus1Transport::start(InternalGPIOPin *rx, InternalGPIOPin *tx, uint32_t now) {
+void Secplus1Transport::start(InternalGPIOPin *rx, InternalGPIOPin *tx, uint32_t now, bool emulate_if_needed) {
   if (started_ || !rx || rx->get_pin() != 5 || (tx && tx->get_pin() != 15)) return;
   rx_ = rx; tx_ = tx;
   if (tx_) { tx_->digital_write(false); tx_->pin_mode(gpio::FLAG_OUTPUT); }
@@ -21,7 +21,7 @@ void Secplus1Transport::start(InternalGPIOPin *rx, InternalGPIOPin *tx, uint32_t
   uart_.begin(1200, SWSERIAL_8E1, 5, tx_ ? 15 : -1, true, 128, 1280);
   started_ = uart_.isListening();
   if (started_) rx_high_ = rx_->digital_read();
-  if (started_) panel_.start(tx_ != nullptr, now);
+  if (started_) panel_.start(tx_ != nullptr, now, emulate_if_needed);
 }
 void Secplus1Transport::loop(uint32_t now) {
   if (!started_) return;
@@ -91,14 +91,22 @@ bool Secplus1Transport::press_light(uint32_t now) {
   ++light_commands_;
   return true;
 }
+bool Secplus1Transport::set_lock(uint32_t now, bool locked) {
+  receiver_.tick(now);
+  const auto baseline = receiver_.locked();
+  if (!baseline || *baseline == locked || !press_(0x34, 0x35, now, DoorState::UNKNOWN, baseline)) return false;
+  ++lock_commands_;
+  return true; // Stock lock-button toggle, only from a fresh differing state.
+}
 bool Secplus1Transport::press_(uint8_t press, uint8_t release, uint32_t now,
-                              DoorState door, std::optional<bool> light) {
+                              DoorState door, std::optional<bool> binary) {
   if (!command_idle(now)) return false;
   // Drain once more immediately before a new press, including the UART edge ring.
   const bool backlog = pump_secplus1(uart_, receiver_, now, [] { return micros(); });
   if (backlog || !command_idle(now)) return false;
   if ((press == 0x30 && receiver_.door() != door) ||
-      (press == 0x32 && receiver_.light() != light)) return false;
+      (press == 0x32 && receiver_.light() != binary) ||
+      (press == 0x34 && receiver_.locked() != binary)) return false;
   release_byte_ = release;
   releases_left_ = 2;
   pressed_ms_ = release_ms_ = now;

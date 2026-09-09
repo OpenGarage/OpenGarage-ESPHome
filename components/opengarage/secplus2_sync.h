@@ -61,7 +61,7 @@ class Secplus2QuerySession {
   void defer(uint32_t now) { last_attempt_ms_ = now; } // No catch-up or per-loop contention storm.
 #ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
   // Only the control opt-in can encode actuations. No raw command, Toggle,
-  // Stop, lock or learn entrypoint. Cleanup may encode a release after a failed
+  // Stop or learn entrypoint. Cleanup may encode a release after a failed
   // press write, but the transport forbids starting a new action in that state.
   bool encode_door(bool open, bool pressed, uint8_t *packet) const {
     return encode_control_(0x280, (uint32_t(open) << 8) | 0x01000000U |
@@ -69,6 +69,9 @@ class Secplus2QuerySession {
   }
   bool encode_light(bool on, uint8_t *packet) const {
     return encode_control_(0x281, uint32_t(on) << 8, packet);
+  }
+  bool encode_lock(bool locked, uint8_t *packet) const {
+    return encode_control_(0x18C, uint32_t(locked) << 8, packet);
   }
   void control_sent(uint32_t now, bool ok) {
     last_attempt_ms_ = now;

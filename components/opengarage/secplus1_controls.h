@@ -3,6 +3,7 @@
 #include "esphome/core/defines.h"
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
 #include "pulse_cover.h"
+#include "opener_light_commands.h"
 #include "secplus1_transport.h"
 #include "esphome/components/light/light_output.h"
 
@@ -68,10 +69,6 @@ class Secplus1LightIntent {
   const char *reason_{"No light command"};
 };
 
-class OpenerLightCommands {
- public:
-  virtual void request_light(bool target) = 0;
-};
 class Secplus1Light : public light::LightOutput {
  public:
   explicit Secplus1Light(OpenerLightCommands *parent) : parent_(parent) {}

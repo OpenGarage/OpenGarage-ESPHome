@@ -42,6 +42,7 @@ class Secplus1Receiver {
     }
     if (door_seen_ && uint32_t(now - door_ms_) >= timeout_ms_) clear_door_();
     if (light_seen_ && uint32_t(now - light_ms_) >= timeout_ms_) clear_light_();
+    if (obstruction_ && uint32_t(now - obstruction_ms_) >= timeout_ms_) obstruction_.reset();
     if (door_count_ && uint32_t(now - door_candidate_ms_) >= timeout_ms_) door_count_ = 0;
     if (light_count_ && uint32_t(now - light_candidate_ms_) >= timeout_ms_) light_count_ = 0;
   }
@@ -85,12 +86,17 @@ class Secplus1Receiver {
           light_ = (value & 4) != 0; locked_ = (value & 8) == 0;
           light_seen_ = true; light_ms_ = now;
         }
-      } // 0x39 is consumed but not exposed: obstruction semantics remain unverified.
+      } else if (request == 0x39) {
+        // Stock compatibility: zero is clear, nonzero obstructed. Stock marks
+        // this interpretation unproven; telemetry only, not a safety interlock.
+        obstruction_ = byte != 0;
+        obstruction_ms_ = now;
+      }
       return;
     }
     start_request_(byte);
   }
-  void transport_loss() { request_ = 0; clear_door_(); clear_light_(); }
+  void transport_loss() { request_ = 0; clear_door_(); clear_light_(); obstruction_.reset(); }
   void note_activity(uint32_t now) { last_byte_ms_ = now; }
   void note_overflow() { inc_(stats_.overflows); transport_loss(); }
   void note_depth(size_t bytes) { stats_.high_water = std::max(stats_.high_water, uint16_t(std::min<size_t>(bytes, UINT16_MAX))); }
@@ -122,6 +128,7 @@ class Secplus1Receiver {
   DoorState door() const { return door_; }
   std::optional<bool> light() const { return light_; }
   std::optional<bool> locked() const { return locked_; }
+  std::optional<bool> obstructed() const { return obstruction_; }
   bool partial() const { return request_ != 0; }
   bool observed_status() const { return observed_status_; }
   bool panel37_seen() const { return stats_.panel37 != 0; }
@@ -149,9 +156,10 @@ class Secplus1Receiver {
   void clear_light_() { light_seen_ = false; light_count_ = 0; light_.reset(); locked_.reset(); }
   uint8_t request_{0}, door_count_{0}, light_count_{0}, light_candidate_{0};
   DoorState door_{DoorState::UNKNOWN}, door_candidate_{DoorState::UNKNOWN};
-  std::optional<bool> light_, locked_;
+  std::optional<bool> light_, locked_, obstruction_;
   std::optional<uint16_t> last_frame_;
   uint32_t last_byte_ms_{0}, door_ms_{0}, light_ms_{0}, door_candidate_ms_{0}, light_candidate_ms_{0};
+  uint32_t obstruction_ms_{0};
   uint32_t timeout_ms_{10000};
   bool door_seen_{false}, light_seen_{false}, observed_status_{false};
   Secplus1Stats stats_;
@@ -160,11 +168,12 @@ class Secplus1Receiver {
   size_t trace_next_{0}, trace_count_{0};
 };
 
-enum class Secplus1PanelState : uint8_t { NOT_STARTED, PASSIVE, WAITING, EXISTING_PANEL, EMULATING, UNSUPPORTED_PANEL, TX_FAULT, STOPPED };
+enum class Secplus1PanelState : uint8_t { NOT_STARTED, PASSIVE, WAITING, EXISTING_PANEL, EMULATING, UNSUPPORTED_PANEL, TX_FAULT, STOPPED, WAITING_NO_EMULATION };
 inline const char *secplus1_panel_name(Secplus1PanelState state) {
   switch (state) {
     case Secplus1PanelState::PASSIVE: return "Passive listening";
     case Secplus1PanelState::WAITING: return "Waiting for wall panel";
+    case Secplus1PanelState::WAITING_NO_EMULATION: return "Emulation disabled; waiting for panel status";
     case Secplus1PanelState::EXISTING_PANEL: return "Existing wall panel; no polling";
     case Secplus1PanelState::EMULATING: return "Emulating wall panel";
     case Secplus1PanelState::UNSUPPORTED_PANEL: return "0x37 panel; active support deferred";
@@ -178,13 +187,18 @@ inline const char *secplus1_panel_name(Secplus1PanelState state) {
 // a bounded scheduler, not a protocol detector or general-purpose command queue.
 class Secplus1Panel {
  public:
-  void start(bool emulate, uint32_t now) { state_ = emulate ? Secplus1PanelState::WAITING : Secplus1PanelState::PASSIVE; started_ms_ = sent_ms_ = now; index_ = 0; }
+  void start(bool transmit, uint32_t now, bool emulate_if_needed = true) {
+    state_ = !transmit ? Secplus1PanelState::PASSIVE : emulate_if_needed ?
+        Secplus1PanelState::WAITING : Secplus1PanelState::WAITING_NO_EMULATION;
+    started_ms_ = sent_ms_ = now; index_ = 0;
+  }
   void tick(uint32_t now, bool observed_status, bool panel37) {
     if (state_ == Secplus1PanelState::STOPPED || state_ == Secplus1PanelState::NOT_STARTED || state_ == Secplus1PanelState::TX_FAULT) return;
     if (panel37) { state_ = Secplus1PanelState::UNSUPPORTED_PANEL; return; }
-    if (state_ != Secplus1PanelState::WAITING) return;
+    if (state_ != Secplus1PanelState::WAITING && state_ != Secplus1PanelState::WAITING_NO_EMULATION) return;
     if (observed_status) state_ = Secplus1PanelState::EXISTING_PANEL;
-    else if (uint32_t(now - started_ms_) >= 20000) state_ = Secplus1PanelState::EMULATING;
+    else if (state_ == Secplus1PanelState::WAITING && uint32_t(now - started_ms_) >= 20000)
+      state_ = Secplus1PanelState::EMULATING;
   }
   std::optional<uint8_t> due(uint32_t now) const {
     if (state_ != Secplus1PanelState::EMULATING || uint32_t(now - sent_ms_) < 250) return {};
