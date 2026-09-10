@@ -81,6 +81,8 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
+    if value["hardware"] == "auto" and "unified_control" not in value:
+        raise cv.Invalid("Automatic hardware detection requires unified_control")
     if "threshold_controls" in value:
         if not any(key in value for key in ("pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
             raise cv.Invalid("Threshold controls require a production control profile with OTA lifecycle support")
@@ -92,8 +94,8 @@ def _options(value):
     if "unified_control" in value:
         if ESPHOME_VERSION != "2026.8.2":
             raise cv.Invalid("Unified startup entity exposure is audited for ESPHome 2026.8.2; re-verify before upgrading")
-        if value["hardware"] != "v2_3":
-            raise cv.Invalid("Unified control requires v2_3 hardware")
+        if value["hardware"] not in ("auto", "v2_3"):
+            raise cv.Invalid("Unified control requires auto or fixed v2_3 hardware")
         if any(key in value for key in ("dev_pulse_control", "pulse_control", "dev_secplus1",
                                        "secplus1_control", "dev_secplus2_rx", "dev_secplus2_sync", "secplus2_control")):
             raise cv.Invalid("Unified control exclusively owns its pulse and Security+ backends")
@@ -330,7 +332,7 @@ CONFIG_SCHEMA = cv.All(
     cv.only_on(["esp8266"]), _add_pins,
     cv.Schema({
         cv.GenerateID(): cv.declare_id(OpenGarageComponent),
-        cv.Required("hardware"): cv.one_of("v2_0_v2_2", "v2_3", lower=True),
+        cv.Required("hardware"): cv.one_of("auto", "v2_0_v2_2", "v2_3", lower=True),
         cv.Optional("dev_pulse_control"): PULSE_BENCH_SCHEMA,
         cv.Optional("pulse_control"): PULSE_MVP_SCHEMA,
         cv.Optional("dev_secplus2_rx"): SECPLUS2_RX_SCHEMA,
@@ -456,6 +458,13 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     unified = "unified_control" in config
+    capability = await cg.gpio_pin_expression(config["capability_pin"])
+    cg.add(var.set_capability_pin(capability))
+    if config["hardware"] == "auto":
+        # Before preference resolution / entity discovery, never a hot switch.
+        cg.add(var.detect_unified_hardware())
+    else:
+        cg.add(var.set_hardware_v23(config["hardware"] == "v2_3"))
     if unified:
         dev = config["unified_control"]
         for define in ("USE_OPENGARAGE_UNIFIED", "USE_OPENGARAGE_SECPLUS1", "USE_OPENGARAGE_SECPLUS1_CONTROL",
@@ -468,8 +477,10 @@ async def to_code(config):
         cg.add(var.set_unified_client(dev["client_id"]))
         cg.add(var.set_secplus1_timeout(dev["status_timeout"].total_milliseconds))
         cg.add(var.set_secplus2_timeout(dev["status_timeout"].total_milliseconds))
-        cg.add(var.set_protocol_select(await select.new_select(dev["protocol"], var, False,
-            options=["Not configured", "None (dry contact)", "Security+ 1.0", "Security+ 2.0"])))
+        protocol = await select.new_select(dev["protocol"], var, False,
+            options=["Not configured", "None (dry contact)", "Security+ 1.0", "Security+ 2.0"])
+        cg.add(var.set_protocol_select(protocol))
+        _mode_exposure(var, protocol, dev["protocol"], 16)  # Hardware capability, not selected protocol.
         panel = await select.new_select(dev["panel_emulation"], var, True, options=["Automatic", "Disabled"])
         cg.add(var.set_panel_select(panel))
         _mode_exposure(var, panel, dev["panel_emulation"], 4)
@@ -595,7 +606,6 @@ async def to_code(config):
                 cg.add(getattr(var, setter)(await text_sensor.new_text_sensor(dev[key])))
         if "pulse_count" in dev:
             cg.add(var.set_pulse_count_sensor(await sensor.new_sensor(dev["pulse_count"])))
-    cg.add(var.set_hardware_v23(config["hardware"] == "v2_3"))
     cg.add(var.set_status_led_enabled(config["status_led_enabled"]))
     for key, setter in (("state_source", "set_source"), ("mounting", "set_mounting"),
                         ("contact_type", "set_contact_type"), ("distance_enabled", "set_distance_enabled"),
@@ -612,7 +622,7 @@ async def to_code(config):
             cg.add(var.set_threshold_number(door, entity))
             if unified and door:
                 _mode_exposure(var, entity, conf, 2)  # None/pulse only; preserve static internal flags.
-    for key in ("button_pin", "led_pin", "capability_pin", "contact_pin"):
+    for key in ("button_pin", "led_pin", "contact_pin"):
         if key in config:
             cg.add(getattr(var, "set_" + key)(await cg.gpio_pin_expression(config[key])))
     if config["distance_enabled"]:

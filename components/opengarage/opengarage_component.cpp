@@ -53,7 +53,9 @@ void OpenGarageComponent::setup() {
   control_button_.update(millis(), !button_pin_->digital_read(), action_controller_);
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #ifdef USE_OPENGARAGE_UNIFIED
-  publish_text(family_text_, "v2.3 unified experimental");
+  publish_text(family_text_, hardware_auto_ ? (!hardware_detected_ ? "Unknown hardware; controls inhibited" :
+      hardware_v23_ ? "v2.3 family (GPIO10 detected)" : "v2.0-v2.2 family (GPIO10 detected)") :
+      "v2.3 unified experimental");
   ESP_LOGW(TAG, "Unified protocol: %s; changes require restart; no automatic protocol detection",
            protocol_name(active_settings_.protocol));
 #elif defined(USE_OPENGARAGE_SECPLUS1_CONTROL)
@@ -124,6 +126,17 @@ void OpenGarageComponent::loop() {
       status_led_.setup(led_pin_, led_inverted_, now);
       const bool capability = capability_low_samples_ > 3;
       publish_binary(capability_sensor_, capability);
+#ifdef USE_OPENGARAGE_UNIFIED
+      // Recheck the early decision without rebinding the backend or changing HA
+      // metadata. An unstable/mismatched strap inhibits before either UART starts.
+      if (hardware_auto_ && (!hardware_detected_ || capability != hardware_v23_ ||
+          (capability_low_samples_ != 0 && capability_low_samples_ != 7))) {
+        hardware_detected_ = false;
+        stop_unified_();
+        publish_text(family_text_, "Unknown hardware; controls inhibited");
+        publish_settings_();
+      }
+#endif
       if (capability != hardware_v23_) ESP_LOGW(TAG, "Capability strap differs from selected hardware profile");
 #ifdef USE_OPENGARAGE_SECPLUS1
       if (secplus1_selected_() && hardware_v23_ && capability && !secplus1_stopped_) {
@@ -150,6 +163,9 @@ void OpenGarageComponent::loop() {
 #ifdef USE_OPENGARAGE_CONTROL
       control_hardware_ok_ = pulse_hardware_matches(hardware_v23_, capability, control_config_.bench_mode,
           !control_config_.bench_mode || get_mac_address_pretty() == bench_mac_);
+#ifdef USE_OPENGARAGE_UNIFIED
+      if (hardware_auto_ && (!hardware_detected_ || hardware_conflict_ || settings_error_)) control_hardware_ok_ = false;
+#endif
       if (!control_hardware_ok_) ESP_LOGW(TAG, "Pulse hardware family/bench identity mismatch: controls inhibited");
 #endif
     }
@@ -388,7 +404,8 @@ void OpenGarageComponent::publish_control_() {
     phase = "Configuration change; controls stopped";
     reason = settings_error_ ? "Settings save failed; check configuration after restart" : "Settings saved; restart device to apply";
   } else if (!update_gate_.open() && !unified_ota_latched_ && active_settings_.protocol == OpenerProtocol::UNCONFIGURED) {
-    reason = "Select Opener Protocol, then restart device";
+    reason = hardware_auto_ && (!hardware_detected_ || !hardware_v23_) ?
+        "Check Protocol Configuration; controls inhibited" : "Select Opener Protocol, then restart device";
   }
 #endif
   publish_text(phase_text_, phase);

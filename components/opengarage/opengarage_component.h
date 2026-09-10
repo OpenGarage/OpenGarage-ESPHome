@@ -109,6 +109,9 @@ class OpenGarageComponent : public Component
   // Codegen calls this before entity configuration and App.setup(), after the
   // platform preference store exists. No I/O or control is started here.
   void load_unified_settings(OpenerProtocol protocol, PanelEmulation panel);
+  // Sample only the capability input before entity metadata is frozen.
+  // Ordinary setup later identifies LED polarity independently.
+  void detect_unified_hardware();
   void set_unified_pins(InternalGPIOPin *rx, InternalGPIOPin *tx) {
     secplus1_rx_pin_ = secplus2_rx_pin_ = rx;
     secplus1_tx_pin_ = secplus2_tx_pin_ = door_pin_ = tx;
@@ -119,7 +122,9 @@ class OpenGarageComponent : public Component
   void set_configuration_text(text_sensor::TextSensor *value) { configuration_text_ = value; }
   void request_setting(bool panel, size_t index) override;
   uint32_t mode_entity_fields(uint32_t fields, uint8_t mask) const {
-    return fields | (protocol_exposes(active_settings_.protocol, mask) ? 0U : (1U << 24));
+    const bool exposed = mask == 16 ? (!hardware_auto_ || (hardware_detected_ && hardware_v23_)) :
+        protocol_exposes(active_settings_.protocol, mask);
+    return fields | (exposed ? 0U : (1U << 24));
   }
 #endif
 #ifdef USE_OPENGARAGE_SECPLUS1
@@ -218,6 +223,7 @@ class OpenGarageComponent : public Component
   ProtocolSelect *protocol_select_{nullptr}, *panel_select_{nullptr};
   text_sensor::TextSensor *configuration_text_{nullptr};
   bool settings_loaded_{false}, configuration_stopped_{false}, settings_error_{false}, unified_ota_latched_{false};
+  bool hardware_auto_{false}, hardware_detected_{false}, hardware_conflict_{false};
   bool secplus1_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS1; }
   bool secplus2_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS2; }
 #else
