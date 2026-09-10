@@ -117,10 +117,16 @@ class OpenGarageComponent : public Component
     secplus1_tx_pin_ = secplus2_tx_pin_ = door_pin_ = tx;
   }
   void set_unified_client(uint32_t value) { secplus2_client_ = value; }
+  // Latched setup/recovery interlock: no runtime path clears it. Provisioning commits
+  // credentials and restarts, so neither backend needs a hot startup path.
+  void inhibit_for_setup() { setup_inhibited_ = true; configuration_stopped_ = true; stop_unified_(); }
+  bool button_recovery_allowed() const { return !update_status_.upload_busy(); }
+  void button_recovery_feedback(bool factory) { inhibit_for_setup(); pulse_outputs_.recovery_feedback(factory); }
   void set_protocol_select(ProtocolSelect *value) { protocol_select_ = value; }
   void set_panel_select(ProtocolSelect *value) { panel_select_ = value; }
   void set_configuration_text(text_sensor::TextSensor *value) { configuration_text_ = value; }
   void request_setting(bool panel, size_t index) override;
+  bool setup_inhibited() const { return setup_inhibited_; }
   uint32_t mode_entity_fields(uint32_t fields, uint8_t mask) const {
     const bool exposed = mask == 16 ? (!hardware_auto_ || (hardware_detected_ && hardware_v23_)) :
         protocol_exposes(active_settings_.protocol, mask);
@@ -169,6 +175,7 @@ class OpenGarageComponent : public Component
     control_config_.warning_ms = warning; control_config_.pulse_ms = pulse; control_config_.lockout_ms = lockout;
   }
   void set_bench_mode(bool value) { control_config_.bench_mode = value; }
+  void set_button_recovery(ButtonRecovery *value) { control_button_.set_recovery(value); }
   void set_armed_sensor(binary_sensor::BinarySensor *sensor) { armed_sensor_ = sensor; }
   void set_phase_text(text_sensor::TextSensor *sensor) { phase_text_ = sensor; }
   void set_reason_text(text_sensor::TextSensor *sensor) { reason_text_ = sensor; }
@@ -223,6 +230,7 @@ class OpenGarageComponent : public Component
   ProtocolSelect *protocol_select_{nullptr}, *panel_select_{nullptr};
   text_sensor::TextSensor *configuration_text_{nullptr};
   bool settings_loaded_{false}, configuration_stopped_{false}, settings_error_{false}, unified_ota_latched_{false};
+  bool setup_inhibited_{false};
   bool hardware_auto_{false}, hardware_detected_{false}, hardware_conflict_{false};
   bool secplus1_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS1; }
   bool secplus2_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS2; }

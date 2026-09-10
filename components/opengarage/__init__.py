@@ -4,7 +4,8 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome import pins
-from esphome.components import binary_sensor, sensor, text_sensor, button, cover, light, lock, ota, select, number
+from esphome.components import binary_sensor, sensor, text_sensor, button, cover, light, lock, ota, select, number, api
+from esphome.components.esphome.ota import ESPHomeOTAComponent
 from esphome.components.esp8266.const import require_waveform
 from esphome.const import CONF_ID, __version__ as ESPHOME_VERSION
 
@@ -29,6 +30,7 @@ MAX_THRESHOLD_CM = 450  # Keep in sync with ThresholdSettings::MAX_CM.
 
 ns = cg.esphome_ns.namespace("opengarage")
 OpenGarageComponent = ns.class_("OpenGarageComponent", cg.Component)
+GenericSetup = ns.class_("GenericSetup", cg.Component)
 ControlCommandButton = ns.class_("ControlCommandButton", button.Button)
 PulseCover = ns.class_("PulseCover", cover.Cover)
 Secplus1Cover = ns.class_("Secplus1Cover", cover.Cover)
@@ -81,6 +83,12 @@ def _add_pins(value):
 
 def _options(value):
     source = value["state_source"]
+    generic = "generic_setup" in value
+    if generic and (value["hardware"] != "auto" or "unified_control" not in value or "threshold_controls" not in value):
+        raise cv.Invalid("Generic setup requires automatic unified hardware and threshold controls")
+    if "unified_control" in value:
+        if (value["unified_control"]["client_id"] == "provisioned") != generic:
+            raise cv.Invalid("client_id: provisioned requires generic_setup, with no compiled client identity")
     if value["hardware"] == "auto" and "unified_control" not in value:
         raise cv.Invalid("Automatic hardware detection requires unified_control")
     if "threshold_controls" in value:
@@ -304,7 +312,7 @@ UNIFIED_CONTROL_SCHEMA = SECPLUS2_CONTROL_SCHEMA.extend({
     cv.Optional("rx_pin", default=5): _fixed_pin(5, "input"),
     cv.Optional("tx_pin", default=15): _fixed_pin(15, "output"),
     cv.Optional("pulse_time", default="1s"): _milliseconds(100, 1000),
-    cv.Required("client_id"): cv.int_range(min=1, max=0xFFFFFFFF),
+    cv.Required("client_id"): cv.Any(cv.one_of("provisioned"), cv.int_range(min=1, max=0xFFFFFFFF)),
     cv.Optional("status_timeout", default="15s"): _milliseconds(10000, 60000),
     cv.Required("light_state"): binary_sensor.binary_sensor_schema(),
     cv.Required("obstruction"): binary_sensor.binary_sensor_schema(device_class="problem", icon="mdi:garage-alert"),
@@ -341,6 +349,12 @@ CONFIG_SCHEMA = cv.All(
         cv.Optional("secplus1_control"): SECPLUS1_CONTROL_SCHEMA,
         cv.Optional("secplus2_control"): SECPLUS2_CONTROL_SCHEMA,
         cv.Optional("unified_control"): UNIFIED_CONTROL_SCHEMA,
+        cv.Optional("generic_setup"): cv.Schema({
+            cv.GenerateID(): cv.declare_id(GenericSetup),
+            cv.Required("api_id"): cv.use_id(api.APIServer),
+            cv.Required("ota_id"): cv.use_id(ESPHomeOTAComponent),
+            cv.Required("status"): text_sensor.text_sensor_schema(entity_category="diagnostic"),
+        }),
         cv.Optional("state_source", default="distance"): cv.enum(SOURCES, lower=True),
         cv.Optional("mounting", default="ceiling"): cv.enum(MOUNTINGS, lower=True),
         cv.Optional("contact_type", default="none"): cv.enum(CONTACTS, lower=True),
@@ -380,6 +394,12 @@ CONFIG_SCHEMA = cv.All(
 
 def _final_validate(config):
     full = fv.full_config.get()
+    generic = "generic_setup" in config
+    if generic:
+        _validate_generic_network(full)
+        if config["generic_setup"]["api_id"] != full["api"]["id"] or config["generic_setup"]["ota_id"] != next(
+                item["id"] for item in full["ota"] if item["platform"] == "esphome"):
+            raise cv.Invalid("Generic setup must own the configured API and OTA listeners")
     if "dev_secplus1" in config and not full.get("ota"):
         raise cv.Invalid("Security+ 1.0 status profile requires OTA lifecycle support")
     if "dev_secplus2_sync" in config:
@@ -405,13 +425,13 @@ def _final_validate(config):
     if full.get("logger", {}).get("hardware_uart", "UART0") != "UART0":
         raise cv.Invalid("OpenGarage logger must use UART0; swapped UART0 and UART1 use reserved pins")
     if any(key in config for key in ("dev_pulse_control", "pulse_control", "secplus1_control", "secplus2_control", "unified_control")):
-        if not full.get("api", {}).get("encryption"):
+        if not generic and not full.get("api", {}).get("encryption"):
             raise cv.Invalid("M2 bench control requires encrypted native API")
         if not full.get("wifi") or not full.get("ota"):
             raise cv.Invalid("M2 bench control requires Wi-Fi and OTA lifecycle support")
         if any(item["platform"] not in ("esphome", "web_server") for item in full["ota"]):
             raise cv.Invalid("M2 bench control supports only audited esphome/web_server OTA platforms")
-        if any(item["platform"] == "esphome" and not item.get("password") for item in full["ota"]):
+        if not generic and any(item["platform"] == "esphome" and not item.get("password") for item in full["ota"]):
             raise cv.Invalid("M2 bench control requires authenticated native OTA")
         if full.get("web_server") and not full["web_server"].get("auth"):
             raise cv.Invalid("M2 bench control requires authenticated web_server")
@@ -435,6 +455,30 @@ def _final_validate(config):
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
+
+
+def _validate_generic_network(full):
+    # Empty fields are ONLY permitted with the runtime credential owner. Its
+    # BUS+1 setup establishes auth before any network component can listen.
+    if full.get("api", {}).get("encryption") != {}:
+        raise cv.Invalid("Generic setup requires keyless api encryption owned by runtime setup")
+    if not full.get("safe_mode", {}).get("disabled"):
+        raise cv.Invalid("Generic setup currently requires safe_mode disabled: early recovery skips credential initialization")
+    wifi = full.get("wifi", {})
+    if full.get("web_server", {}).get("port") != 80 or wifi.get("ap", {}).get("manual_ip") or wifi.get("fast_connect", {}).get("enabled"):
+        raise cv.Invalid("Generic setup requires port 80, default AP addressing and normal Wi-Fi preference layout")
+    if wifi.get("networks") or wifi.get("ssid") or wifi.get("password") or wifi.get("ap", {}).get("password"):
+        raise cv.Invalid("Generic setup must not contain compiled Wi-Fi credentials")
+    if "ap" not in wifi or "captive_portal" not in full or not full.get("esphome", {}).get("name_add_mac_suffix"):
+        raise cv.Invalid("Generic setup requires captive portal and MAC-suffixed naming")
+    auth = full.get("web_server", {}).get("auth", {})
+    if auth.get("type") != "digest" or auth.get("username") != "admin" or auth.get("password") != "runtime-owned-not-a-password":
+        raise cv.Invalid("Generic setup requires runtime-owned admin digest authentication")
+    native = [item for item in full.get("ota", []) if item["platform"] == "esphome"]
+    if len(native) != 1 or native[0].get("password") != "":
+        raise cv.Invalid("Generic setup requires one runtime-owned native OTA password")
+    if any(key in full for key in ("mqtt", "improv_serial", "esp32_improv", "provisioning")):
+        raise cv.Invalid("Generic setup owns commissioning; unaudited alternate transports are not supported")
 
 
 def _mode_exposure(parent, entity, config, mask):
@@ -474,7 +518,8 @@ async def to_code(config):
         cg.add(var.load_unified_settings(dev["initial_protocol"], dev["initial_panel_emulation"]))
         cg.add(var.set_unified_pins(await cg.gpio_pin_expression(dev["rx_pin"]),
                                     await cg.gpio_pin_expression(dev["tx_pin"])))
-        cg.add(var.set_unified_client(dev["client_id"]))
+        if dev["client_id"] != "provisioned":
+            cg.add(var.set_unified_client(dev["client_id"]))
         cg.add(var.set_secplus1_timeout(dev["status_timeout"].total_milliseconds))
         cg.add(var.set_secplus2_timeout(dev["status_timeout"].total_milliseconds))
         protocol = await select.new_select(dev["protocol"], var, False,
@@ -642,3 +687,18 @@ async def to_code(config):
     for key, setter in (("door_state", "set_door_text"), ("vehicle_state", "set_vehicle_text"), ("hardware_family", "set_family_text")):
         if key in config:
             cg.add(getattr(var, setter)(await text_sensor.new_text_sensor(config[key])))
+    if "generic_setup" in config:
+        conf = config["generic_setup"]
+        cg.add_define("USE_OPENGARAGE_GENERIC_SETUP")
+        # The pinned API guard also means 'externally owned PSK': no upstream
+        # preference may overwrite it, and no API client may clear/replace it.
+        # There is deliberately NO YAML PSK or generated set_noise_psk literal.
+        cg.add_define("USE_API_NOISE_PSK_FROM_YAML")
+        setup = cg.new_Pvariable(conf[CONF_ID], var,
+                                await cg.get_variable(conf["api_id"]),
+                                await cg.get_variable(conf["ota_id"]))
+        await cg.register_component(setup, conf)
+        cg.add(setup.set_status_sensor(await text_sensor.new_text_sensor(conf["status"])))
+        # Keep the original mode and threshold records first. All later generic
+        # versions must retain this allocation order and fixed record size.
+        cg.add(setup.load_credentials())

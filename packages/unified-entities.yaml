@@ -1,0 +1,72 @@
+esphome:
+  project:
+    version: 0.9.0-dev-unified
+
+packages:
+  thresholds: !include thresholds.yaml
+  reset_diagnostics: !include reset-diagnostics.yaml
+
+esp8266:
+  restore_from_flash: true
+
+opengarage:
+  unified_control:
+    initial_protocol: unconfigured
+    initial_panel_emulation: automatic
+    protocol:
+      name: Opener Protocol
+    panel_emulation:
+      name: Sec+ 1.0 Panel Emulation
+    configuration_state:
+      name: Protocol Configuration
+    cover:
+      name: Garage Door
+    light:
+      name: Opener Light
+      restore_mode: ALWAYS_OFF
+    remote_lock:
+      name: Remote Lock
+    state_valid:
+      name: Door State Valid
+    light_state:
+      name: Opener Light State
+    obstruction:
+      name: Obstruction
+    panel_state:
+      name: Sec+ 1.0 Panel Mode
+    sync_state:
+      name: Sec+ 2.0 Session
+    rolling_code:
+      name: Rolling Code
+    openings:
+      name: Opener Opening Count
+    warning_time: 5s
+    pulse_time: 1s
+    lockout_time: 30s  # Open/Close cooldown only; wall-button Toggle bypasses this.
+    request_toggle:
+      name: Request Door Toggle
+    cancel:
+      name: Cancel Pending Action
+    firmware_update_mode:
+      name: Enter Firmware Update Mode
+    controls_armed:
+      name: Controls Ready
+    control_phase:
+      name: Control Phase
+    last_action_reason:
+      name: Last Action Reason
+    command_count:
+      name: Door Command Count
+    light_action_reason:
+      name: Last Light Action Reason
+    light_command_count:
+      name: Light Command Count
+    lock_action_reason:
+      name: Last Lock Action Reason
+    lock_command_count:
+      name: Lock Command Count
+
+button:
+  - platform: restart
+    name: Restart Device
+    entity_category: config

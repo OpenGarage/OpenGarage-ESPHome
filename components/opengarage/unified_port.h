@@ -104,6 +104,10 @@ class UnifiedOutputs : public ControlOutputs {
   bool supports_stopped_direction() const override { return active_ && active_->supports_stopped_direction(); }
   bool reports_motion() const override { return active_ && active_->reports_motion(); }
   bool pulse_active() const override { return active_ && active_->pulse_active(); }
+  void recovery_feedback(bool factory) {
+    // Parent stops all protocol/control work first. Finite buzzer-only feedback.
+    if (initialized_) tone(13, factory ? 2000 : 1000, factory ? 300 : 100);
+  }
   void stop() override { if (active_) active_->stop(); }
  protected:
   PulseOutputs pulse_;

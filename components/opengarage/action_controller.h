@@ -180,6 +180,7 @@ class ActionController {
   void shutdown() { disarm(ActionReason::SHUTDOWN); stopped_ = true; }
   void reject_unsupported() { reason_ = ActionReason::UNSUPPORTED; }
   bool armed() const { return armed_; }
+  bool bench_mode() const { return config_.bench_mode; }
   bool endpoint_ready() const { return endpoint_(); }
   bool pending() const { return phase_ == ActionPhase::WARNING || phase_ == ActionPhase::PULSING; }
   ActionPhase phase() const { return phase_; }
@@ -266,14 +267,25 @@ class ActionController {
   bool dispatch_seen_{false};
 };
 
-// Owns the complete physical gesture. A press canceling a warning is consumed
-// through release, including a long hold; it can never become a second request.
+// Physical-only owner: no HA/YAML reset action.
+class ButtonRecovery {
+ public:
+  virtual ~ButtonRecovery() = default;
+  virtual void button_hold(bool factory) = 0;
+  virtual void button_release(bool factory) = 0;
+};
+
+// Cancellation consumes the door gesture, but a production recovery hold may
+// continue. Only a debounced release commits a reset; never a threshold crossing.
 class ControlButton {
  public:
+  static constexpr uint32_t AP_RESET_MS = 5000;
+  static constexpr uint32_t FACTORY_RESET_MS = 10000;
+  void set_recovery(ButtonRecovery *recovery) { recovery_ = recovery; }
   void update(uint32_t now, bool pressed, ActionController &controller) {
     if (!initialized_) {
       initialized_ = true; raw_ = stable_ = pressed; changed_at_ = now;
-      consumed_ = pressed;  // Button held during boot must first be released.
+      consumed_ = ignore_boot_hold_ = pressed;  // Held at boot must first be released.
       return;
     }
     if (pressed && controller.pending()) {
@@ -281,20 +293,42 @@ class ControlButton {
       consumed_ = true;  // Immediate raw-level cancellation has precedence over a due dispatch.
     }
     if (pressed != raw_) { raw_ = pressed; changed_at_ = now; }
-    if (raw_ == stable_ || uint32_t(now - changed_at_) < 50) return;
-    stable_ = raw_;
-    if (stable_) { pressed_at_ = changed_at_; return; }
-    if (consumed_) { consumed_ = false; return; }
-    if (uint32_t(changed_at_ - pressed_at_) >= 3000) {
-      if (controller.armed()) controller.disarm();
-      else controller.arm_locally(now);
-    } else if (controller.armed()) {
-      controller.request_local_toggle(now);
+    if (raw_ != stable_ && uint32_t(now - changed_at_) >= 50) {
+      stable_ = raw_;
+      if (stable_) { pressed_at_ = changed_at_; hold_stage_ = 0; }
+      else {
+        const auto duration = uint32_t(changed_at_ - pressed_at_);
+        const bool ignore = ignore_boot_hold_, canceled = consumed_;
+        ignore_boot_hold_ = consumed_ = false;
+        hold_stage_ = 0;
+        if (ignore) return;
+        if (!controller.bench_mode() && duration >= AP_RESET_MS) {
+          if (recovery_) recovery_->button_release(duration >= FACTORY_RESET_MS);
+          return;  // Even without a recovery owner, a long hold never toggles.
+        }
+        if (canceled) return;
+        if (controller.bench_mode() && duration >= 3000) {
+          if (controller.armed()) controller.disarm();
+          else controller.arm_locally(now);
+        } else if (controller.armed()) controller.request_local_toggle(now);
+        return;
+      }
+    }
+    // Classify by raw release time, not the end of its debounce interval.
+    if (stable_ && raw_ && !ignore_boot_hold_ && !controller.bench_mode()) {
+      const auto duration = uint32_t(now - pressed_at_);
+      const uint8_t stage = duration >= FACTORY_RESET_MS ? 2 : duration >= AP_RESET_MS ? 1 : 0;
+      if (stage > hold_stage_) {
+        hold_stage_ = stage;
+        if (recovery_) recovery_->button_hold(stage == 2);
+      }
     }
   }
  protected:
   uint32_t changed_at_{0}, pressed_at_{0};
-  bool initialized_{false}, raw_{false}, stable_{false}, consumed_{false};
+  bool initialized_{false}, raw_{false}, stable_{false}, consumed_{false}, ignore_boot_hold_{false};
+  uint8_t hold_stage_{0};
+  ButtonRecovery *recovery_{nullptr};
 };
 
 }  // namespace esphome::opengarage

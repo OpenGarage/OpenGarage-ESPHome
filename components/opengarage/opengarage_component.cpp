@@ -50,6 +50,9 @@ void OpenGarageComponent::setup() {
 #endif
   action_controller_.configure(control_config_);
   action_controller_.initialize(millis());
+#ifdef USE_OPENGARAGE_UNIFIED
+  if (setup_inhibited_) stop_unified_();
+#endif
   control_button_.update(millis(), !button_pin_->digital_read(), action_controller_);
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #ifdef USE_OPENGARAGE_UNIFIED
@@ -400,7 +403,10 @@ void OpenGarageComponent::publish_control_() {
   const char *phase = update_status_.phase(action_controller_.phase(), protocol);
   const char *reason = update_status_.reason(action_controller_.reason(), protocol);
 #ifdef USE_OPENGARAGE_UNIFIED
-  if (!update_gate_.open() && !unified_ota_latched_ && configuration_stopped_) {
+  if (!update_gate_.open() && !unified_ota_latched_ && setup_inhibited_) {
+    phase = "Setup/recovery; controls stopped";
+    reason = "See Device Setup; configuration or restart required";
+  } else if (!update_gate_.open() && !unified_ota_latched_ && configuration_stopped_) {
     phase = "Configuration change; controls stopped";
     reason = settings_error_ ? "Settings save failed; check configuration after restart" : "Settings saved; restart device to apply";
   } else if (!update_gate_.open() && !unified_ota_latched_ && active_settings_.protocol == OpenerProtocol::UNCONFIGURED) {
@@ -456,7 +462,8 @@ void OpenGarageComponent::on_ota_global_state(ota::OTAState state, float, uint8_
 #ifdef USE_OPENGARAGE_THRESHOLDS
   thresholds_stopped_ = true;
 #endif
-  // An attempted/failed OTA does not re-arm; require a reboot and deliberate local arming.
+  // An attempted/failed OTA never resumes controls in this boot. Only the
+  // historical bench profile additionally requires local arming after restart.
   action_controller_.shutdown();
 #ifdef USE_OPENGARAGE_UNIFIED
   unified_ota_latched_ = true;

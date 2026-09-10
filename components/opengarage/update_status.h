@@ -4,7 +4,8 @@
 
 namespace esphome::opengarage {
 
-// Presentation only. Does not open the upload gate, resume controls, or send work.
+// OTA indication and physical-reset interlock. Does not open the upload gate,
+// resume controls, or send work.
 // Keep the indication independent of Last Action Reason: a rejected command or
 // Cancel must not hide the latched update mode. A new instance starts inactive.
 class UpdateStatus {
@@ -13,6 +14,7 @@ class UpdateStatus {
   void started() { state_ = State::UPLOADING; }
   void failed() { state_ = State::FAILED; }
   void completed() { state_ = State::COMPLETED; }
+  bool upload_busy() const { return state_ == State::UPLOADING || state_ == State::COMPLETED; }
   const char *phase(ActionPhase normal, bool protocol) const {
     switch (state_) {
       case State::PREPARED: return "Firmware update mode";

@@ -84,6 +84,7 @@ void OpenGarageComponent::publish_settings_() {
 }
 
 void OpenGarageComponent::request_setting(bool panel, size_t index) {
+  if (setup_inhibited_) return;
   if (!settings_loaded_ || index > (panel ? 1U : 3U)) return;
   // Hidden metadata is not an authorization boundary. Refuse unsupported raw
   // requests without disarming an otherwise working legacy board or writing flash.

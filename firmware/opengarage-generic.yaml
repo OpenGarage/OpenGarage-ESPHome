@@ -1,0 +1,45 @@
+# Generic experimental candidate. No private secrets file is used.
+substitutions:
+  device_name: opengarage
+  friendly_name: OpenGarage
+  hardware: auto
+packages:
+  core: !include ../packages/read-only.yaml
+  control: !include ../packages/unified-entities.yaml
+esphome:
+  name_add_mac_suffix: true
+  project:
+    version: 0.10.1-dev-generic
+wifi:
+  reboot_timeout: 0s
+  ap: {}
+captive_portal:
+api:
+  id: generic_api
+  encryption: {}
+  reboot_timeout: 0s
+ota:
+  - platform: esphome
+    id: generic_ota
+    password: ""  # Replaced BEFORE listener setup, never an operational empty password.
+  - platform: web_server
+web_server:
+  port: 80
+  version: 3
+  auth:
+    type: digest
+    username: admin
+    password: runtime-owned-not-a-password  # Schema sentinel, replaced BEFORE any listener.
+  include_internal: false
+# Upstream safe mode returns before our preference/auth owner is generated.
+# Never enable it with empty compile-time credentials. Serial recovery remains.
+safe_mode:
+  disabled: true
+opengarage:
+  unified_control:
+    client_id: provisioned
+  generic_setup:
+    api_id: generic_api
+    ota_id: generic_ota
+    status:
+      name: Device Setup
