@@ -529,12 +529,19 @@ bool OpenGarageComponent::auxiliary_enabled_() const {
 #else
   return identification_done_ && control_hardware_ok_ && !secplus2_stopped_ &&
 #endif
-      !update_gate_.open() && action_controller_.armed() && !action_controller_.pending() &&
-      action_controller_.endpoint_ready() && // Toggle motion readiness does not expand auxiliary controls.
+      !update_gate_.open() &&
       wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
 }
-bool OpenGarageComponent::light_enabled_() const { return auxiliary_enabled_() && !lock_intent_.waiting(); }
-bool OpenGarageComponent::lock_enabled_() const { return auxiliary_enabled_() && !light_intent_.waiting(); }
+bool OpenGarageComponent::light_enabled_() const {
+  // Light is independent of door position, arming, warning and travel cooldown.
+  // Its intent/transport still validate light freshness and serialize bus writes.
+  return auxiliary_enabled_() && !lock_intent_.waiting();
+}
+bool OpenGarageComponent::lock_enabled_() const {
+  // Retain Remote Lock's existing endpoint-only/no-pending-door policy.
+  return auxiliary_enabled_() && action_controller_.armed() && !action_controller_.pending() &&
+      action_controller_.endpoint_ready() && !light_intent_.waiting();
+}
 void OpenGarageComponent::request_light(bool target) {
   // Do not advance a due door warning from a competing light callback.
   light_intent_.request(millis(), target, light_enabled_());

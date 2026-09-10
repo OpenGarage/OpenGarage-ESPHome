@@ -15,6 +15,10 @@ class ControlOutputs {
   virtual bool pulse(uint32_t duration_ms) = 0;
   // A wall-button press is distinct from an endpoint-directed cover request.
   virtual bool toggle(uint32_t duration_ms, DoorState) { return pulse(duration_ms); }
+  // Pulse/Sec+ 1.0 retain endpoint-only behavior. Sec+ 2.0 carries the
+  // explicit target and the observed state into its final pre-write check.
+  virtual bool directed(uint32_t duration_ms, bool, DoorState) { return pulse(duration_ms); }
+  virtual bool supports_stopped_direction() const { return false; }
   virtual bool reports_motion() const { return false; }
   virtual bool pulse_active() const = 0;
   virtual void stop() = 0;
@@ -188,7 +192,10 @@ class ActionController {
     if (!armed_ || stopped_) return reject_(ActionReason::DISARMED);
     if (pending()) return reject_(ActionReason::BUSY);
     const bool wall_toggle = !config_.bench_mode && command == DoorCommand::TOGGLE;
-    if (cooldown_ && !wall_toggle)
+    const bool stopped_direction = !config_.bench_mode &&
+        (command == DoorCommand::OPEN || command == DoorCommand::CLOSE) &&
+        state_ == DoorState::STOPPED && outputs_.supports_stopped_direction();
+    if (cooldown_ && !wall_toggle && !stopped_direction)
       return reject_(config_.bench_mode ? ActionReason::LOCKOUT : ActionReason::TARGET_LOCKOUT);
     if (!config_.bench_mode && dispatch_seen_ && uint32_t(now - dispatched_at_) < REPEAT_GUARD_MS)
       return reject_(ActionReason::REPEAT_GUARD);
@@ -200,9 +207,9 @@ class ActionController {
       disarm(!hardware_ok_ ? ActionReason::HARDWARE_MISMATCH : ActionReason::UNKNOWN_STATE);
       return false;
     }
-    // Refusing an endpoint-only cover request must not disable the available
-    // wall-button action during protocol motion or while stopped partway.
-    if (!wall_toggle && !endpoint_()) return reject_(ActionReason::UNKNOWN_STATE);
+    // Sec+ 2.0 can explicitly resume either direction from confirmed Stopped.
+    // Other non-endpoint cover refusals must not disable the wall-button action.
+    if (!wall_toggle && !endpoint_() && !stopped_direction) return reject_(ActionReason::UNKNOWN_STATE);
     if (needs_link_(source) && !link_ok_) {
       if (config_.bench_mode) disarm(ActionReason::LINK_DOWN);
       return reject_(ActionReason::LINK_DOWN);  // A rejected remote request must not disable local MVP use.
@@ -234,7 +241,9 @@ class ActionController {
   }
   bool dispatch_(uint32_t now) {
     const bool wall_toggle = !config_.bench_mode && action_command_ == DoorCommand::TOGGLE;
-    const bool sent = wall_toggle ? outputs_.toggle(config_.pulse_ms, warning_state_) : outputs_.pulse(config_.pulse_ms);
+    const bool sent = wall_toggle ? outputs_.toggle(config_.pulse_ms, warning_state_) :
+        action_command_ == DoorCommand::TOGGLE ? outputs_.pulse(config_.pulse_ms) :
+        outputs_.directed(config_.pulse_ms, action_command_ == DoorCommand::OPEN, warning_state_);
     if (!sent) { disarm(ActionReason::OUTPUT_FAILURE); return false; }
     ++dispatches_;
     dispatched_at_ = now;

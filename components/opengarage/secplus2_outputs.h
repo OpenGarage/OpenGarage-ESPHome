@@ -41,6 +41,10 @@ class Secplus2Outputs : public ControlOutputs {
   }
   bool pulse(uint32_t) override { return buzzer_ && port_.press_door(millis()); }
   bool toggle(uint32_t, DoorState expected) override { return buzzer_ && port_.toggle_door(millis(), expected); }
+  bool directed(uint32_t, bool open, DoorState expected) override {
+    return buzzer_ && port_.move_door(millis(), open, expected);
+  }
+  bool supports_stopped_direction() const override { return true; }
   bool reports_motion() const override { return true; }
   bool pulse_active() const override { return port_.releasing(); }
   void stop() override { warning_stop(); port_.cancel_press(); }

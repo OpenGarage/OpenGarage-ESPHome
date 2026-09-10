@@ -134,23 +134,32 @@ Secplus2Transport::WriteResult Secplus2Transport::write_control_(const uint8_t *
   return ok ? WriteResult::SENT : WriteResult::FAILED;
 }
 bool Secplus2Transport::press_door(uint32_t now) {
-  return door_press_(now, false);
+  // Compatibility path for endpoint-derived pulses, never a guessed direction
+  // from Stopped. Native cover requests use move_door() with an explicit target.
+  receiver_.tick(now);
+  const auto state = receiver_.door();
+  if (state != DoorState::OPEN && state != DoorState::CLOSED) return false;
+  return move_door(now, state == DoorState::CLOSED, state);
+}
+bool Secplus2Transport::move_door(uint32_t now, bool open, DoorState expected) {
+  return door_press_(now, false, expected, open);
 }
 bool Secplus2Transport::toggle_door(uint32_t now, DoorState expected) {
-  return door_press_(now, true, expected);
+  return door_press_(now, true, expected, false);
 }
-bool Secplus2Transport::door_press_(uint32_t now, bool toggle, DoorState expected) {
+bool Secplus2Transport::door_press_(uint32_t now, bool toggle, DoorState expected, bool open) {
   receiver_.tick(now);
   const auto baseline = receiver_.door();
   if (baseline == DoorState::UNKNOWN ||
-      (!toggle && baseline != DoorState::OPEN && baseline != DoorState::CLOSED) || !command_idle(now)) return false;
-  if (toggle && baseline != expected) return false; // A stale moving decision must not become an un-warned start.
-  // Decode any pending edges/bytes before choosing a direction. Refuse if the
-  // endpoint changed, even if the controller hasn't published it yet.
+      (!toggle && baseline != DoorState::OPEN && baseline != DoorState::CLOSED && baseline != DoorState::STOPPED) ||
+      !command_idle(now)) return false;
+  if (baseline != expected) return false; // Bind the warned/moving decision to the actual observed state.
+  if (!toggle && baseline == (open ? DoorState::OPEN : DoorState::CLOSED)) return false;
+  // Decode any pending edges/bytes before sending the requested direction.
+  // Refuse any changed state, even if the controller hasn't published it yet.
   const bool backlog = pump_secplus2(uart_, receiver_, now, [] { return micros(); });
   if (backlog || !command_idle(now) || receiver_.door() != baseline) return false;
   uint8_t packet[Secplus2Receiver::PACKET_SIZE];
-  const bool open = baseline == DoorState::CLOSED;
   if (!(toggle ? session_.encode_toggle(true, packet) : session_.encode_door(open, true, packet))) return false;
   const auto result = write_control_(packet);
   if (result == WriteResult::COLLISION) return false; // No UART write, no late retry.

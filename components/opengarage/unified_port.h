@@ -98,6 +98,10 @@ class UnifiedOutputs : public ControlOutputs {
   void warning_stop() override { if (active_) active_->warning_stop(); }
   bool pulse(uint32_t ms) override { return active_ && active_->pulse(ms); }
   bool toggle(uint32_t ms, DoorState expected) override { return active_ && active_->toggle(ms, expected); }
+  bool directed(uint32_t ms, bool open, DoorState expected) override {
+    return active_ && active_->directed(ms, open, expected);
+  }
+  bool supports_stopped_direction() const override { return active_ && active_->supports_stopped_direction(); }
   bool reports_motion() const override { return active_ && active_->reports_motion(); }
   bool pulse_active() const override { return active_ && active_->pulse_active(); }
   void stop() override { if (active_) active_->stop(); }

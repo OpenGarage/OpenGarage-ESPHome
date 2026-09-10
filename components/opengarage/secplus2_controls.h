@@ -35,7 +35,9 @@ template<class Port> class TargetLightIntent {
   bool request(uint32_t now, bool target, bool enabled) {
     port_.receiver().tick(now);
     if (!enabled || !port_.controls_available()) return reject_("Controls unavailable");
-    if (waiting_ || port_.releasing() || (cooldown_ && uint32_t(now - sent_ms_) < 2000))
+    // A door/light/lock release may finish inside the bounded bus-idle wait;
+    // never interleave a new press with that tail or retry a transmitted command.
+    if (waiting_ || (cooldown_ && uint32_t(now - sent_ms_) < 2000))
       return reject_("Busy; not queued");
     const auto value = port_.receiver().light();
     if (!value) return reject_("Light state unknown");
