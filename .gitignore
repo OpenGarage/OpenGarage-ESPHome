@@ -1,4 +1,5 @@
 .venv/
+.local/
 .esphome/
 __pycache__/
 build/

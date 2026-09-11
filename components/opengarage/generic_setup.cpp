@@ -276,10 +276,10 @@ void GenericSetup::handleRequest(AsyncWebServerRequest *request) {
     }
     if (new_client_id_ == 0) {
       uint32_t generated = 0;
-      if (!random_bytes(reinterpret_cast<uint8_t *>(&generated), sizeof(generated)) || generated == 0) {
+      if (!random_bytes(reinterpret_cast<uint8_t *>(&generated), sizeof(generated))) {
         send_(request, 503, "text/plain", "Could not generate identity. Retry setup."); return;
       }
-      new_client_id_ = generated;
+      new_client_id_ = secplus2_client_id_from_random(generated);
     }
     // Repeated previews reuse this ID. It joins the existing fixed-size record
     // on confirmation; normal boot/OTA/Wi-Fi reset load it without regeneration.

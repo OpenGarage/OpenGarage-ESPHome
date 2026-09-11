@@ -1,6 +1,6 @@
-# Build and contribute
+# Build and Contribute
 
-Users of a released generic binary do not need a compiler. For customization, clone the complete source tree; its YAML uses local packages/components and is not a standalone downloadable configuration.
+A released binary can be installed without a compiler. To customize this firmware, clone the complete source tree; its YAML uses local packages/components and is not a standalone downloadable configuration.
 
 Use Python 3.12 and a supported ESPHome build environment:
 
@@ -18,9 +18,11 @@ CI checks repository links/includes, validates this entrypoint and compiles it. 
 
 ## Architecture
 
+Keep private deployment files, internal notes, large local test suites and logs outside the repository or under the ignored `.local/` directory. Do not force-add them; review staged files before committing. Keep public CI focused on the supported build and essential checks.
+
 The generic entrypoint includes `read-only.yaml` and `unified-entities.yaml`; the latter includes thresholds and reset diagnostics. `components/opengarage` owns sensing, hardware selection, protocol scheduling, actuation, provisioning and web UI extensions. `components/opengarage_secplus_codec` provides the attributed Security+ codec. Shared source retains internal development branches to avoid a release-preparation refactor; no extra public build profiles are required.
 
-## Pinned framework contracts
+## Pinned Framework Contracts
 
 ESPHome **2026.8.2**, Arduino **3.1.2**, ESP8266 platform **4.2.1** are pinned. Do not simply relax the guard when upgrading:
 
@@ -32,4 +34,3 @@ ESPHome **2026.8.2**, Arduino **3.1.2**, ESP8266 platform **4.2.1** are pinned. 
 - Run full maintainer regressions, compile, inspect flash/OTA capacity, and retain the exact artifacts before coordinated hardware verification. Do not run config-generation tests concurrently with compilation in the same build directory.
 
 An ESPHome compile alone does not prove safe storage migration or recovery. See [VENDOR.md](../VENDOR.md) before changing imported dependencies.
-

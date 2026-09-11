@@ -6,6 +6,12 @@
 #include <string>
 
 namespace esphome::opengarage {
+// Konnected's client-ID convention: 14 random bits above fixed hex suffix 2908.
+// Only for new provisioning; never normalize an existing saved identity.
+inline uint32_t secplus2_client_id_from_random(uint32_t random) {
+  return ((random & 0x7F7FU) << 16) | 0x2908U;
+}
+
 // Allocation-ordered ESP8266 preference record. Do not resize/reorder it in an
 // OTA update. API, web/OTA and opener identity commit together, with the upstream
 // preference checksum covering the entire record. Flash is NOT encrypted.
