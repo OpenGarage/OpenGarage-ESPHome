@@ -121,6 +121,16 @@ class OpenGarageComponent : public Component
   // credentials and restarts, so neither backend needs a hot startup path.
   void inhibit_for_setup() { setup_inhibited_ = true; configuration_stopped_ = true; stop_unified_(); }
   bool button_recovery_allowed() const { return !update_status_.upload_busy(); }
+  bool startup_audio_allowed() const {
+    return !startup_audio_shutdown_ && !unified_ota_latched_ && !update_gate_.open() && !action_controller_.pending() &&
+        (!configuration_stopped_ || setup_inhibited_);
+  }
+  void startup_tune(StartupTune tune) { if (startup_audio_allowed()) pulse_outputs_.startup_tune(millis(),tune); }
+  void service_startup_audio(bool allowed) { pulse_outputs_.service_startup(millis(),allowed && startup_audio_allowed()); }
+  bool report_ip(const char *ip) {
+    if (configuration_stopped_ || setup_inhibited_ || action_controller_.stopped() || action_controller_.pending()) return false;
+    return pulse_outputs_.report_ip(millis(), ip);
+  }
   void button_recovery_feedback(bool factory) { inhibit_for_setup(); pulse_outputs_.recovery_feedback(factory); }
   void set_protocol_select(ProtocolSelect *value) { protocol_select_ = value; }
   void set_panel_select(ProtocolSelect *value) { panel_select_ = value; }
@@ -231,6 +241,7 @@ class OpenGarageComponent : public Component
   text_sensor::TextSensor *configuration_text_{nullptr};
   bool settings_loaded_{false}, configuration_stopped_{false}, settings_error_{false}, unified_ota_latched_{false};
   bool setup_inhibited_{false};
+  bool startup_audio_shutdown_{false};
   bool hardware_auto_{false}, hardware_detected_{false}, hardware_conflict_{false};
   bool secplus1_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS1; }
   bool secplus2_selected_() const { return active_settings_.protocol == OpenerProtocol::SECPLUS2; }

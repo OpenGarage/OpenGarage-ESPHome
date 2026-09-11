@@ -9,7 +9,7 @@ packages:
 esphome:
   name_add_mac_suffix: true
   project:
-    version: 0.10.1-dev-generic
+    version: 0.10.21-dev-generic
 wifi:
   reboot_timeout: 0s
   ap: {}
@@ -26,6 +26,8 @@ ota:
 web_server:
   port: 80
   version: 3
+  # Balance the dashboard and link to settings; keep authenticated /update.
+  js_include: ../components/opengarage/dashboard_settings.js
   auth:
     type: digest
     username: admin

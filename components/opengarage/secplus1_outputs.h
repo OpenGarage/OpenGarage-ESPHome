@@ -44,6 +44,7 @@ class Secplus1Outputs : public ControlOutputs {
   bool reports_motion() const override { return true; }
   bool pulse_active() const override { return port_.releasing(); }
   void stop() override { warning_stop(); port_.cancel_press(); }
+  void stop_for_readiness() override { if (warning_) warning_stop(); port_.cancel_press(); }
  protected:
   Secplus1Transport &port_;
   InternalGPIOPin *buzzer_{nullptr};

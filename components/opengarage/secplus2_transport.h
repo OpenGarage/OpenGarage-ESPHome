@@ -30,11 +30,12 @@ class Secplus2Transport {
 #ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
   bool controls_available() const {
     return started_ && tx_ && !stopped_ && !control_fault_ &&
-        session_.state() == Secplus2QuerySession::State::OBSERVED && receiver_.valid();
+        session_.state() == Secplus2QuerySession::State::OBSERVED && receiver_.status_link_fresh();
   }
   bool command_idle(uint32_t now) const;
   bool press_door(uint32_t now);
   bool move_door(uint32_t now, bool open, DoorState expected);
+  // UNKNOWN expected: caller completed the full warning; no position binding.
   bool toggle_door(uint32_t now, DoorState expected);
   bool set_light(uint32_t now, bool on);
   bool set_lock(uint32_t now, bool locked);

@@ -31,6 +31,7 @@ class Secplus2Receiver {
       increment_(stats_.partial_timeouts);
     }
     if (status_seen_ && uint32_t(now - last_status_ms_) >= status_timeout_ms_) invalidate_status_();
+    if (status_link_seen_ && uint32_t(now - last_status_link_ms_) >= status_timeout_ms_) status_link_seen_ = false;
   }
   void feed(uint8_t byte, uint32_t now) {
     tick(now);
@@ -65,6 +66,9 @@ class Secplus2Receiver {
     }
 #endif
     if (command != 0x081) { increment_(stats_.unknown_commands); return; }
+    // A decoded opener response establishes link freshness even if its position
+    // code is not recognized. Position validity remains independent.
+    status_link_seen_ = true; last_status_link_ms_ = now;
     const auto door = decode_door_((data >> 8) & 0x0F);
     if (door == DoorState::UNKNOWN) {
       increment_(stats_.semantic_errors);
@@ -79,13 +83,14 @@ class Secplus2Receiver {
     last_status_ms_ = now;
     increment_(stats_.status_frames);
   }
-  void transport_loss() { used_ = 0; invalidate_status_(); }
+  void transport_loss() { used_ = 0; status_link_seen_ = false; invalidate_status_(); }
   void note_overflow() { increment_(stats_.overflows); transport_loss(); }
   void note_depth(size_t bytes) {
     stats_.high_water = std::max(stats_.high_water, uint16_t(std::min<size_t>(bytes, UINT16_MAX)));
   }
   void note_service(uint32_t us) { stats_.max_service_us = std::max(stats_.max_service_us, us); }
   bool valid() const { return status_seen_; }
+  bool status_link_fresh() const { return status_link_seen_; }
   DoorState door() const { return door_; }
   std::optional<bool> light() const { return light_; }
   std::optional<bool> locked() const { return lock_; }
@@ -100,6 +105,8 @@ class Secplus2Receiver {
 #endif
 
  protected:
+  bool status_link_seen_{false};
+  uint32_t last_status_link_ms_{0};
   static void increment_(uint32_t &value) { if (value != UINT32_MAX) ++value; }
   static DoorState decode_door_(uint8_t value) {
     switch (value) {

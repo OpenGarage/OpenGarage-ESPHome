@@ -24,6 +24,7 @@ class GenericSetup : public Component, public AsyncWebHandler, public ButtonReco
   // ESPAsyncWebServer otherwise discards URL-encoded POST fields before dispatch.
   bool isRequestHandlerTrivial() const override { return false; }
   void button_hold(bool factory) override;
+  void button_report_ip() override;
   void button_release(bool factory) override;
  protected:
   static constexpr uint32_t WINDOW_MS = 600000;  // Initial open AP, ten minutes per power-up.
@@ -39,6 +40,9 @@ class GenericSetup : public Component, public AsyncWebHandler, public ButtonReco
   esphome::ESPHomeOTAComponent *ota_;
   text_sensor::TextSensor *status_{nullptr};
   ESPPreferenceObject preference_;
+  ESPPreferenceObject setup_tune_preference_; // RTC only; never shifts the flash credential/Wi-Fi slots.
+  static constexpr uint32_t SETUP_TUNE_MARKER = 0x4F47544EU;
+  bool setup_tune_pending_{false}, ap_announced_{false}, station_announced_{false};
   SavedWiFiReset wifi_reset_;
   GenericCredentials credentials_{};
   std::string auth_password_;  // Stable c_str until set_auth_ refreshes the middleware pointers.

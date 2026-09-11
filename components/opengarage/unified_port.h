@@ -3,6 +3,8 @@
 #include "esphome/core/defines.h"
 #ifdef USE_OPENGARAGE_UNIFIED
 #include "protocol_mode.h"
+#include "ip_reporter.h"
+#include "startup_tune.h"
 #include "pulse_outputs.h"
 #include "secplus1_outputs.h"
 #include "secplus2_outputs.h"
@@ -93,23 +95,46 @@ class UnifiedOutputs : public ControlOutputs {
       default: break;
     }
   }
-  void warning_start(uint32_t ms) override { if (active_) active_->warning_start(ms); }
+  void warning_start(uint32_t ms) override { cancel_audio_(); if (active_) active_->warning_start(ms); }
   bool warning_tick(uint32_t ms) override { return active_ && active_->warning_tick(ms); }
-  void warning_stop() override { if (active_) active_->warning_stop(); }
-  bool pulse(uint32_t ms) override { return active_ && active_->pulse(ms); }
-  bool toggle(uint32_t ms, DoorState expected) override { return active_ && active_->toggle(ms, expected); }
+  void warning_stop() override { cancel_audio_(); if (active_) active_->warning_stop(); }
+  bool pulse(uint32_t ms) override { cancel_audio_(); return active_ && active_->pulse(ms); }
+  bool toggle(uint32_t ms, DoorState expected) override { cancel_audio_(); return active_ && active_->toggle(ms, expected); }
   bool directed(uint32_t ms, bool open, DoorState expected) override {
+    cancel_audio_();
     return active_ && active_->directed(ms, open, expected);
   }
   bool supports_stopped_direction() const override { return active_ && active_->supports_stopped_direction(); }
   bool reports_motion() const override { return active_ && active_->reports_motion(); }
   bool pulse_active() const override { return active_ && active_->pulse_active(); }
   void recovery_feedback(bool factory) {
+    cancel_audio_();
     // Parent stops all protocol/control work first. Finite buzzer-only feedback.
     if (initialized_) tone(13, factory ? 2000 : 1000, factory ? 300 : 100);
   }
-  void stop() override { if (active_) active_->stop(); }
+  bool report_ip(uint32_t now, const char *ip) {
+    startup_.cancel(); return initialized_ && ip_reporter_.start(now, ip);
+  }
+  void startup_tune(uint32_t now, StartupTune tune) {
+    if (initialized_ && !ip_reporter_.active()) startup_.start(now,tune);
+  }
+  void service_startup(uint32_t now, bool allowed) {
+    if (allowed) startup_.tick(now); else startup_.cancel();
+  }
+  void service_ip(uint32_t now, bool allowed) {
+    if (allowed) ip_reporter_.tick(now); else ip_reporter_.cancel();
+  }
+  void stop() override { cancel_audio_(); if (active_) active_->stop(); }
+  void stop_for_readiness() override {
+    // Diagnostic audio cannot overlap our warning/pulse: dispatch preempts it.
+    // Still stop the actuator/transport; do not mute GPIO13 owned by the reporter.
+    if (!ip_reporter_.active() && !startup_.active()) { stop(); return; }
+    if (active_) active_->stop_for_readiness();
+  }
  protected:
+  void cancel_audio_() { ip_reporter_.cancel(); startup_.cancel(); }
+  StartupMelody startup_;
+  IPReporter ip_reporter_;
   PulseOutputs pulse_;
   Secplus1Outputs one_;
   Secplus2Outputs two_;

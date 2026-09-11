@@ -57,7 +57,7 @@ void OpenGarageComponent::setup() {
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #ifdef USE_OPENGARAGE_UNIFIED
   publish_text(family_text_, hardware_auto_ ? (!hardware_detected_ ? "Unknown hardware; controls inhibited" :
-      hardware_v23_ ? "v2.3 family (GPIO10 detected)" : "v2.0-v2.2 family (GPIO10 detected)") :
+      hardware_v23_ ? "v2.3+" : "v2.0-2.2") :
       "v2.3 unified experimental");
   ESP_LOGW(TAG, "Unified protocol: %s; changes require restart; no automatic protocol detection",
            protocol_name(active_settings_.protocol));
@@ -305,6 +305,9 @@ void OpenGarageComponent::publish_(uint32_t now) {
 }
 
 void OpenGarageComponent::on_shutdown() {
+#ifdef USE_OPENGARAGE_UNIFIED
+  startup_audio_shutdown_ = true;
+#endif
 #ifdef USE_OPENGARAGE_THRESHOLDS
   thresholds_stopped_ = true;
 #endif
@@ -386,6 +389,12 @@ void OpenGarageComponent::service_control_(uint32_t now) {
   const auto state = resolve_state(config_, distance, contact, protocol);
   action_controller_.update(now, state.door, hardware_ok,
                             wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected());
+#ifdef USE_OPENGARAGE_UNIFIED
+  // The release callback may start a note using millis() later than this
+  // service pass's captured `now`. Never tick it with that older timestamp.
+  pulse_outputs_.service_ip(millis(), !configuration_stopped_ && !setup_inhibited_ && !action_controller_.stopped() &&
+      wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected());
+#endif
   publish_control_();
 }
 

@@ -150,15 +150,15 @@ bool Secplus2Transport::toggle_door(uint32_t now, DoorState expected) {
 bool Secplus2Transport::door_press_(uint32_t now, bool toggle, DoorState expected, bool open) {
   receiver_.tick(now);
   const auto baseline = receiver_.door();
-  if (baseline == DoorState::UNKNOWN ||
-      (!toggle && baseline != DoorState::OPEN && baseline != DoorState::CLOSED && baseline != DoorState::STOPPED) ||
+  const bool position_independent = toggle && expected == DoorState::UNKNOWN;
+  if ((!toggle && baseline != DoorState::OPEN && baseline != DoorState::CLOSED && baseline != DoorState::STOPPED) ||
       !command_idle(now)) return false;
-  if (baseline != expected) return false; // Bind the warned/moving decision to the actual observed state.
+  if (!position_independent && baseline != expected) return false;
   if (!toggle && baseline == (open ? DoorState::OPEN : DoorState::CLOSED)) return false;
-  // Decode any pending edges/bytes before sending the requested direction.
-  // Refuse any changed state, even if the controller hasn't published it yet.
+  // Decode pending edges/bytes before dispatch. Directed and immediate-moving
+  // commands remain state-bound; a fully warned Toggle is position-independent.
   const bool backlog = pump_secplus2(uart_, receiver_, now, [] { return micros(); });
-  if (backlog || !command_idle(now) || receiver_.door() != baseline) return false;
+  if (backlog || !command_idle(now) || (!position_independent && receiver_.door() != baseline)) return false;
   uint8_t packet[Secplus2Receiver::PACKET_SIZE];
   if (!(toggle ? session_.encode_toggle(true, packet) : session_.encode_door(open, true, packet))) return false;
   const auto result = write_control_(packet);

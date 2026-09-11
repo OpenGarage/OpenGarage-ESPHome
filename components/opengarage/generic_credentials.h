@@ -30,23 +30,4 @@ struct GenericCredentials {
 };
 static_assert(sizeof(GenericCredentials) == 104, "Generic OTA preference layout must remain stable");
 
-// Imported identities are decimal or 0x hexadecimal, exactly 32 bits, nonzero.
-// No truncation, signs, whitespace, octal interpretation or partial parsing.
-inline bool parse_client_id(const std::string &text, uint32_t &out) {
-  size_t start = 0;
-  unsigned base = 10;
-  if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { start = 2; base = 16; }
-  if (start == text.size() || text.size() > 10) return false;
-  uint32_t value = 0;
-  for (size_t i = start; i < text.size(); ++i) {
-    const char c = text[i];
-    const unsigned digit = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 :
-                           c >= 'A' && c <= 'F' ? c - 'A' + 10 : 255;
-    if (digit >= base || value > (UINT32_MAX - digit) / base) return false;
-    value = value * base + digit;
-  }
-  if (value == 0) return false;
-  out = value;
-  return true;
-}
 }  // namespace esphome::opengarage

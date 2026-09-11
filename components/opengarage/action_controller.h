@@ -22,6 +22,8 @@ class ControlOutputs {
   virtual bool reports_motion() const { return false; }
   virtual bool pulse_active() const = 0;
   virtual void stop() = 0;
+  // Readiness loss still stops actuation/warnings, but need not stop diagnostics.
+  virtual void stop_for_readiness() { stop(); }
 };
 
 enum class ActionPhase : uint8_t { DISARMED, IDLE, WARNING, PULSING, LOCKOUT };
@@ -112,7 +114,7 @@ class ActionController {
     if (cooldown_ && uint32_t(now - dispatched_at_) >= config_.lockout_ms) cooldown_ = false;
     if (stopped_) return;
     if (!config_.bench_mode && config_valid_ && !manually_disabled_ && !armed_ &&
-        hardware_ok_ && known_()) {
+        hardware_ok_) {
       armed_ = true;
       phase_ = idle_phase_();
       if (reason_ == ActionReason::DISARMED) reason_ = ActionReason::READY;
@@ -125,9 +127,13 @@ class ActionController {
     if (armed_ && !link_ok_ && (config_.bench_mode || (pending() && needs_link_(action_source_)))) {
       disarm(ActionReason::LINK_DOWN); return;
     }
-    if (armed_ && !known_()) { disarm(ActionReason::UNKNOWN_STATE); return; }
+    if (armed_ && !known_() && (config_.bench_mode || (pending() && action_command_ != DoorCommand::TOGGLE))) {
+      disarm(ActionReason::UNKNOWN_STATE); return;
+    }
     if (phase_ == ActionPhase::WARNING) {
-      if (state_ != warning_state_) { cancel(now, ActionReason::STATE_CHANGED); return; }
+      if (state_ != warning_state_ && (config_.bench_mode || action_command_ != DoorCommand::TOGGLE)) {
+        cancel(now, ActionReason::STATE_CHANGED); return;
+      }
       const auto elapsed = uint32_t(now - warning_at_);
       const bool warning_complete = outputs_.warning_tick(elapsed);
       if (elapsed < config_.warning_ms || !warning_complete) return;
@@ -148,7 +154,7 @@ class ActionController {
       return reject_(ActionReason::LOOP_STALL);
     if (!hardware_ok_) return reject_(ActionReason::HARDWARE_MISMATCH);
     if (config_.bench_mode && !link_ok_) return reject_(ActionReason::LINK_DOWN);
-    if (!known_()) return reject_(ActionReason::UNKNOWN_STATE);
+    if (config_.bench_mode && !known_()) return reject_(ActionReason::UNKNOWN_STATE);
     if (config_.bench_mode && cooldown_) return reject_(ActionReason::LOCKOUT);
     if (pending()) return reject_(ActionReason::BUSY);
     armed_ = true;
@@ -172,7 +178,10 @@ class ActionController {
   }
   void disarm(ActionReason reason = ActionReason::DISARMED) {
     if (!config_.bench_mode && reason == ActionReason::DISARMED) manually_disabled_ = true;
-    outputs_.stop();
+    if (reason == ActionReason::UNKNOWN_STATE || reason == ActionReason::HARDWARE_MISMATCH)
+      outputs_.stop_for_readiness();
+    else
+      outputs_.stop();
     armed_ = false;
     phase_ = ActionPhase::DISARMED;
     reason_ = reason;  // Deliberately retain cooldown across disarm/rearm attempts.
@@ -183,6 +192,7 @@ class ActionController {
   bool bench_mode() const { return config_.bench_mode; }
   bool endpoint_ready() const { return endpoint_(); }
   bool pending() const { return phase_ == ActionPhase::WARNING || phase_ == ActionPhase::PULSING; }
+  bool stopped() const { return stopped_; }
   ActionPhase phase() const { return phase_; }
   ActionReason reason() const { return reason_; }
   uint32_t dispatches() const { return dispatches_; }
@@ -204,7 +214,7 @@ class ActionController {
       disarm(ActionReason::LOOP_STALL); return false;
     }
     if (config_.bench_mode && uint32_t(now - armed_at_) >= ARM_SESSION_MS) { disarm(ActionReason::EXPIRED); return false; }
-    if (!hardware_ok_ || !known_()) {
+    if (!hardware_ok_ || (config_.bench_mode && !known_())) {
       disarm(!hardware_ok_ ? ActionReason::HARDWARE_MISMATCH : ActionReason::UNKNOWN_STATE);
       return false;
     }
@@ -242,7 +252,10 @@ class ActionController {
   }
   bool dispatch_(uint32_t now) {
     const bool wall_toggle = !config_.bench_mode && action_command_ == DoorCommand::TOGGLE;
-    const bool sent = wall_toggle ? outputs_.toggle(config_.pulse_ms, warning_state_) :
+    // UNKNOWN is the position-independent, fully warned Toggle contract.
+    // Immediate moving Toggles retain their observed-motion binding.
+    const auto expected = phase_ == ActionPhase::WARNING ? DoorState::UNKNOWN : warning_state_;
+    const bool sent = wall_toggle ? outputs_.toggle(config_.pulse_ms, expected) :
         action_command_ == DoorCommand::TOGGLE ? outputs_.pulse(config_.pulse_ms) :
         outputs_.directed(config_.pulse_ms, action_command_ == DoorCommand::OPEN, warning_state_);
     if (!sent) { disarm(ActionReason::OUTPUT_FAILURE); return false; }
@@ -273,14 +286,16 @@ class ButtonRecovery {
   virtual ~ButtonRecovery() = default;
   virtual void button_hold(bool factory) = 0;
   virtual void button_release(bool factory) = 0;
+  virtual void button_report_ip() {}
 };
 
 // Cancellation consumes the door gesture, but a production recovery hold may
 // continue. Only a debounced release commits a reset; never a threshold crossing.
 class ControlButton {
  public:
-  static constexpr uint32_t AP_RESET_MS = 5000;
-  static constexpr uint32_t FACTORY_RESET_MS = 10000;
+  static constexpr uint32_t REPORT_IP_MS = 800;
+  static constexpr uint32_t AP_RESET_MS = 4500;
+  static constexpr uint32_t FACTORY_RESET_MS = 9500;
   void set_recovery(ButtonRecovery *recovery) { recovery_ = recovery; }
   void update(uint32_t now, bool pressed, ActionController &controller) {
     if (!initialized_) {
@@ -302,11 +317,16 @@ class ControlButton {
         ignore_boot_hold_ = consumed_ = false;
         hold_stage_ = 0;
         if (ignore) return;
-        if (!controller.bench_mode() && duration >= AP_RESET_MS) {
-          if (recovery_) recovery_->button_release(duration >= FACTORY_RESET_MS);
+        if (!controller.bench_mode() && duration > AP_RESET_MS) {
+          if (recovery_) recovery_->button_release(duration > FACTORY_RESET_MS);
           return;  // Even without a recovery owner, a long hold never toggles.
         }
         if (canceled) return;
+        if (duration <= 50) return;
+        if (!controller.bench_mode() && duration > REPORT_IP_MS) {
+          if (recovery_) recovery_->button_report_ip();
+          return; // Missing IP/report owner must never turn this into a door action.
+        }
         if (controller.bench_mode() && duration >= 3000) {
           if (controller.armed()) controller.disarm();
           else controller.arm_locally(now);
@@ -317,7 +337,7 @@ class ControlButton {
     // Classify by raw release time, not the end of its debounce interval.
     if (stable_ && raw_ && !ignore_boot_hold_ && !controller.bench_mode()) {
       const auto duration = uint32_t(now - pressed_at_);
-      const uint8_t stage = duration >= FACTORY_RESET_MS ? 2 : duration >= AP_RESET_MS ? 1 : 0;
+      const uint8_t stage = duration > FACTORY_RESET_MS ? 2 : duration > AP_RESET_MS ? 1 : 0;
       if (stage > hold_stage_) {
         hold_stage_ = stage;
         if (recovery_) recovery_->button_hold(stage == 2);

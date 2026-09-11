@@ -26,7 +26,7 @@ class Secplus2QuerySession {
     if (state_ != State::SEEKING && state_ != State::OBSERVED) return;
     if (status_sent_ && rx.valid() && rx.stats().status_frames != status_baseline_) status_seen_ = true;
     if (openings_sent_ && rx.openings().has_value() && rx.openings_frames() != openings_baseline_) openings_seen_ = true;
-    if (state_ == State::OBSERVED && !rx.valid()) {
+    if (state_ == State::OBSERVED && !rx.status_link_fresh()) {
       state_ = State::SEEKING; started_ms_ = now;
       status_seen_ = openings_seen_ = status_sent_ = openings_sent_ = false;
       next_openings_ = false;

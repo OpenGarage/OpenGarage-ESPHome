@@ -51,6 +51,12 @@ class PulseOutputs : public ControlOutputs {
     return true;
   }
   bool pulse_active() const override { return active_; }
+  void stop_for_readiness() override {
+    off_.detach();
+    if (ready_) door_->digital_write(false);
+    active_ = false;
+    if (warning_) warning_stop();
+  }
   void stop() override {
     off_.detach();
     if (ready_) door_->digital_write(false);

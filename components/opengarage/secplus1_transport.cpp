@@ -85,9 +85,10 @@ bool Secplus1Transport::toggle_door(uint32_t now, DoorState expected) {
 bool Secplus1Transport::door_press_(uint32_t now, bool toggle, DoorState expected) {
   receiver_.tick(now);
   const auto door = receiver_.door();
-  if (door == DoorState::UNKNOWN || (!toggle && door != DoorState::CLOSED && door != DoorState::OPEN)) return false;
-  if (toggle && door != expected) return false; // Bind the controller's warning/motion decision to this report.
-  if (!press_(0x30, 0x31, now, door, {})) return false;
+  const bool position_independent = toggle && expected == DoorState::UNKNOWN;
+  if (!toggle && door != DoorState::CLOSED && door != DoorState::OPEN) return false;
+  if (toggle && !position_independent && door != expected) return false;
+  if (!press_(0x30, 0x31, now, door, {}, position_independent)) return false;
   ++door_commands_;
   return true;
 }
@@ -106,12 +107,12 @@ bool Secplus1Transport::set_lock(uint32_t now, bool locked) {
   return true; // Stock lock-button toggle, only from a fresh differing state.
 }
 bool Secplus1Transport::press_(uint8_t press, uint8_t release, uint32_t now,
-                              DoorState door, std::optional<bool> binary) {
+                              DoorState door, std::optional<bool> binary, bool position_independent) {
   if (!command_idle(now)) return false;
   // Drain once more immediately before a new press, including the UART edge ring.
   const bool backlog = pump_secplus1(uart_, receiver_, now, [] { return micros(); });
   if (backlog || !command_idle(now)) return false;
-  if ((press == 0x30 && receiver_.door() != door) ||
+  if ((press == 0x30 && !position_independent && receiver_.door() != door) ||
       (press == 0x32 && receiver_.light() != binary) ||
       (press == 0x34 && receiver_.locked() != binary)) return false;
   release_byte_ = release;

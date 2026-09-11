@@ -30,6 +30,10 @@ void GenericSetup::load_credentials() {
     preference_ = global_preferences->make_preference<GenericCredentials>(GenericCredentials::MAGIC, true);
     configured_ = preference_.load(&credentials_) && credentials_.valid();
     wifi_reset_.bind_next_slot();  // Alias only: preserves the following Wi-Fi/API allocation order.
+    setup_tune_preference_ = global_preferences->make_preference<uint32_t>(SETUP_TUNE_MARKER, false);
+    uint32_t marker=0, clear=0;
+    if (setup_tune_preference_.load(&marker) && marker==SETUP_TUNE_MARKER)
+      setup_tune_pending_ = setup_tune_preference_.save(&clear); // Consume once across the setup's soft reboot.
   }
   if (configured_) {
     parent_->set_unified_client(credentials_.client_id);
@@ -98,6 +102,34 @@ void GenericSetup::loop() {
     wifi::global_wifi_component->disable();
     if (status_) status_->publish_state("Setup window closed; power-cycle to reopen; outputs inhibited");
   }
+  auto *wifi=wifi::global_wifi_component;
+  const bool allowed=!failed_ && !expired_ && !recovery_inhibited_ && !recovery_committed_ && wifi;
+  bool station=false;
+  if (allowed && configured_ && !parent_->setup_inhibited() && wifi->is_connected()) {
+    for (const auto &ip : wifi->get_ip_addresses()) if (ip.is_ip4() && ip.is_set()) { station=true; break; }
+  }
+  const bool ap=allowed && wifi->is_ap_active();
+  if (station && !station_announced_) {
+    station_announced_=true; // If a warning/IP report owns the buzzer, skip rather than queue.
+    parent_->startup_tune(setup_tune_pending_?StartupTune::SETUP_SUCCESS:StartupTune::STATION);
+    setup_tune_pending_=false;
+  } else if (!station && ap && !ap_announced_) {
+    ap_announced_=true;
+    parent_->startup_tune(StartupTune::AP);
+  }
+  parent_->service_startup_audio(allowed && (station || ap));
+}
+
+void GenericSetup::button_report_ip() {
+  auto *wifi = wifi::global_wifi_component;
+  if (!configured_ || recovery_inhibited_ || !wifi || !wifi->is_connected()) return;
+  for (const auto &ip : wifi->get_ip_addresses()) {
+    if (!ip.is_ip4() || !ip.is_set()) continue;
+    char address[64]; // Larger than ESPHome's IPv4/IPv6 formatting buffer requirement.
+    ip.str_to(address);
+    parent_->report_ip(address);
+    return;
+  }
 }
 
 void GenericSetup::button_hold(bool factory) {
@@ -109,7 +141,7 @@ void GenericSetup::button_hold(bool factory) {
   recovery_inhibited_ = true;
   parent_->button_recovery_feedback(factory); // Stop controls/transports before buzzer feedback.
   if (status_) status_->publish_state(factory ? "Release button for factory reset; all settings will be erased" :
-      "Release button for Wi-Fi AP reset; hold to 10 seconds for factory reset");
+      "Release button for Wi-Fi AP reset; hold past 9.5 seconds for factory reset");
 }
 
 void GenericSetup::button_release(bool factory) {
@@ -119,7 +151,7 @@ void GenericSetup::button_release(bool factory) {
     return;
   }
   recovery_inhibited_ = true;
-  parent_->inhibit_for_setup(); // Also covers release exactly at 5/10 s without a preceding threshold tick.
+  parent_->inhibit_for_setup(); // Also covers release without a preceding threshold tick.
   const bool ok = global_preferences && (factory ? global_preferences->reset() : wifi_reset_.clear());
   if (!ok) {
     if (status_) status_->publish_state("Reset save failed; outputs inhibited; retry or recover over USB");
@@ -192,9 +224,15 @@ void GenericSetup::handleRequest(AsyncWebServerRequest *request) {
   if (url == "/wifisave") { send_(request, 405, "text/plain", "Use the authenticated setup form."); return; }
   if (request->method() == HTTP_GET) {
     if (url == "/og/info") {
+      const std::string mac = get_mac_address_pretty();
+      const std::string mac_suffix = mac.substr(12, 2) + mac.substr(15, 2);
       char id[11]; std::snprintf(id, sizeof(id), "%lu", (unsigned long) credentials_.client_id);
       const std::string key = configured_ ? base64_encode(credentials_.api_key.data(), credentials_.api_key.size()) : "";
       send_(request, 200, "application/json", std::string("{\"configured\":") + (configured_ ? "true" : "false") +
+          // Match canHandle(): while the AP is active, GET / serves setup, not the dashboard.
+          ",\"dashboard_available\":" + (configured_ && !wifi::global_wifi_component->is_ap_active() ? "true" : "false") +
+          ",\"hostname\":\"" + App.get_name().c_str() + ".local\"" +
+          ",\"mac_suffix\":\"" + mac_suffix + "\"" +
           ",\"token\":\"" + token_ + "\",\"key\":\"" + key + "\",\"client_id\":\"" + (configured_ ? id : "") + "\"}");
     } else if (url == "/config.json") {
       captive_portal::global_captive_portal->handle_config(request);  // Standard scan results/escaping.
@@ -231,18 +269,21 @@ void GenericSetup::handleRequest(AsyncWebServerRequest *request) {
   }
   if (!configured_) {
     GenericCredentials pending = credentials_;
-    const auto identity = form_value(request, "identity");
-    if (identity == "import") {
-      if (!parse_client_id(form_value(request, "client_id"), pending.client_id)) {
-        send_(request, 400, "text/plain", "Enter the existing nonzero 32-bit client ID (decimal or 0x hex)."); return;
-      }
-    } else if (identity.empty() || identity == "new") {
-      if (new_client_id_ == 0 &&
-          (!random_bytes(reinterpret_cast<uint8_t *>(&new_client_id_), sizeof(new_client_id_)) || new_client_id_ == 0)) {
+    // Identity is automatic, not user input. Reject obsolete/custom forms rather
+    // than pretending that a supplied identity was imported.
+    if (request->hasParam("identity", true) || request->hasParam("client_id", true)) {
+      send_(request, 400, "text/plain", "Client identity is automatic. Reload the setup page."); return;
+    }
+    if (new_client_id_ == 0) {
+      uint32_t generated = 0;
+      if (!random_bytes(reinterpret_cast<uint8_t *>(&generated), sizeof(generated)) || generated == 0) {
         send_(request, 503, "text/plain", "Could not generate identity. Retry setup."); return;
       }
-      pending.client_id = new_client_id_;
-    } else { send_(request, 400, "text/plain", "Choose new setup or import an existing client identity."); return; }
+      new_client_id_ = generated;
+    }
+    // Repeated previews reuse this ID. It joins the existing fixed-size record
+    // on confirmation; normal boot/OTA/Wi-Fi reset load it without regeneration.
+    pending.client_id = new_client_id_;
     if (preview) {
       // No flash/Wi-Fi changes here. Give the installer time to save credentials
       // before the AP disappears (captive browsers may close on connection).
@@ -269,7 +310,11 @@ void GenericSetup::handleRequest(AsyncWebServerRequest *request) {
   }
   // ESPHome's standard saved Wi-Fi backend, not an OG-specific Wi-Fi store.
   wifi::global_wifi_component->save_wifi_sta(ssid, wifi_password);
-  send_(request, 200, "text/plain", "Saved. Connecting and restarting. Rejoin your home Wi-Fi and add OpenGarage in Home Assistant using the saved HA key. If Wi-Fi fails, reconnect to the setup AP using the saved admin password.");
+  if (wifi::global_wifi_component->is_ap_active()) {
+    const uint32_t marker=SETUP_TUNE_MARKER;
+    if (!setup_tune_preference_.save(&marker)) ESP_LOGW("og.setup", "Setup melody marker unavailable; using normal boot tune");
+  }
+  send_(request, 200, "text/plain", "Wi-Fi settings saved; restarting. Connection to the new network is not yet confirmed. Join that network, then open the device address below. If Wi-Fi fails, reconnect to the setup AP using the saved admin password.");
   set_timeout("setup-restart", 3000, []() { App.safe_reboot(); });
 }
 }  // namespace esphome::opengarage
