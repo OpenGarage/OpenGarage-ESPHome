@@ -1,0 +1,11 @@
+.venv/
+.esphome/
+__pycache__/
+build/
+devices/
+firmware/secrets.yaml
+firmware/local-*.yaml
+firmware/.gitignore
+*.bin
+*.elf
+*.map
