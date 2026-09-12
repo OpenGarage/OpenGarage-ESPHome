@@ -22,8 +22,14 @@ The key can also be retrieved from `http://DEVICE-IP/og/setup`, using username *
 
 Check **Hardware Version** and **Protocol Configuration**. If you have OpenGarage v2.3+, use **Opener Protocol** to select the protocol that matches your garage door opener. Restart, then verify sensing, calibration and warning audibility before supervised use. See [Operation](operation.md). The device page is usable immediately; the [Dashboard Templates](dashboard.md) are optional and must be added manually.
 
+<img src="images/home-assistant-device.jpg" alt="OpenGarage device page in Home Assistant showing device information, controls and sensors" width="560">
+
 ## Device Web Interface
 
 The homepage shows controls, sensors, garage configuration and diagnostics. **Open setup** leads to `/og/setup` for HA pairing details, firmware uploads and Wi-Fi administration. Both pages use the same admin authentication. A browser may cache authentication, so repeated password prompts are not guaranteed; close the browser session or use a private window when using a shared computer.
 
+<img src="images/web-dashboard.jpg" alt="OpenGarage built-in web dashboard showing controls, sensors, protocol selection and vehicle distance threshold" width="800">
+
 To change Wi-Fi while connected, enter the new SSID and password under **Change WiFi Settings**. Station mode uses manual entry; AP setup/recovery offers the network list. Follow the displayed `.local` address after reconnecting to the new network, or consult the router. Never expose the device's web/API/OTA ports directly to the Internet. Use securely configured HA remote access instead.
+
+<img src="images/device-setup.jpg" alt="OpenGarage Setup and Update page with Home Assistant pairing, firmware update and Wi-Fi settings; encryption key removed" width="560">

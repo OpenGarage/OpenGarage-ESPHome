@@ -4,6 +4,10 @@ ESPHome-based firmware for OpenGarage (OG) with local Home Assistant (HA) integr
 
 **Experimental firmware for user testing.** Basic operation has been manually tested, but broad opener compatibility and long-term reliability have not been established. Read the [known issues and safety limits](docs/known-issues.md).
 
+<img src="docs/images/home-assistant-dashboard.jpg" alt="Home Assistant dashboard with OpenGarage door, light and remote-lock controls alongside door and vehicle sensors" width="800">
+
+Example using the [optional Home Assistant cards](docs/dashboard.md). A [built-in web interface](docs/install.md#device-web-interface) is also available.
+
 ## Start Here
 
 To install: download the release `.bin`, upload it to OG, configure Wi-Fi through its setup AP, and add the discovered ESPHome device to Home Assistant. No compilation, MQTT broker, HACS or ESPHome Device Builder is required to use a prebuilt image. This firmware replaces the stock UI and stock cloud integrations.
