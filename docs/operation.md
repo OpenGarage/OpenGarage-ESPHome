@@ -13,7 +13,11 @@ Hardware detection does not automatically detect the opener's protocol. Inconsis
 
 **Panel Emulation:** For Security+ 1.0, automatic panel detection listens initially for an existing smart panel before deciding whether to emulate one. The initial listening interval is 20 seconds. Consult **Sec+ 1.0 Panel Mode** for the result. Attach the intended panel before powering on OG; do not add one during active emulation. The special `0x37` panel is unsupported for active control. Protocol and panel-setting changes require restart.
 
+With an existing Security+ 1.0 smart panel, light/lock commands and warned door requests may wait briefly for a suitable gap in panel traffic. If the bus remains busy, a request can expire without being sent—even after the warning sounds. A Toggle during confirmed motion does not wait: it can be refused if no suitable gap is available immediately. Transmitted toggles are not automatically retried.
+
 ## Door Actions
+
+If a Security+ 2.0 opener stops responding, OG retries status queries automatically. The **Sec+ 2.0 Session** diagnostic shows **No response; waiting to retry** between attempts. Waits increase from 30 seconds to a five-minute cap; controls remain unavailable until responses are observed again. Pending actions are not replayed. A **TX failed; reboot required** message is a separate fault and still requires a restart.
 
 - **Garage Door Open/Close** requests a direction using the reported door state. Requesting Open when already Open, or Close when already Closed, does nothing. Directional requests require a known Open/Closed state; Security+ 2.0 also permits either direction from a confirmed Stopped state. They are not accepted while state is Unknown or the door is moving. A **30-second cooldown** starts when a door command is sent and normally blocks further Open/Close requests.
 - **Request Door Toggle** behaves like an opener button and can be requested even when door state is unknown, subject to the other hardware, setup, transport and network guards. It bypasses the 30-second directional-command cooldown.

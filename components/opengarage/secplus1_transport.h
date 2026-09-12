@@ -24,7 +24,7 @@ class Secplus1Transport {
   void format_tx_block(char *out, size_t capacity) const;
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
   bool controls_available() const { return started_ && tx_ && !control_fault_ && panel_.commands_ready(); }
-  bool command_idle(uint32_t now) const;
+  bool command_idle(uint32_t now);
   bool press_door(uint32_t now);
   // UNKNOWN expected: caller completed the full warning; no position binding.
   bool toggle_door(uint32_t now, DoorState expected);
@@ -42,11 +42,15 @@ class Secplus1Transport {
               bool position_independent = false);
   void service_release_(uint32_t now, bool backlog);
   void emergency_release_();
+  bool write_button_(uint8_t byte);
   Ticker force_low_;
   uint32_t pressed_ms_{0}, release_ms_{0}, last_tx_ms_{0}, door_commands_{0}, light_commands_{0};
   uint32_t lock_commands_{0};
   uint8_t release_byte_{0}, releases_left_{0};
   bool expedited_release_{false}, control_fault_{false}, tx_seen_{false};
+#ifdef OG_SEC1_TRACE
+  bool trace_release_deferred_{false};
+#endif
 #endif
  protected:
   class ReceiveUart : public SoftwareSerial {

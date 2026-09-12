@@ -559,6 +559,7 @@ async def to_code(config):
         if "last_frame" in dev:
             cg.add(var.set_secplus1_frame_text(await text_sensor.new_text_sensor(dev["last_frame"])))
         if "raw_trace" in dev:
+            cg.add_define("USE_OPENGARAGE_SECPLUS1_RAW_TRACE")
             cg.add(var.set_secplus1_trace_text(await text_sensor.new_text_sensor(dev["raw_trace"])))
         if "tx_block_reason" in dev:
             cg.add(var.set_secplus1_block_text(await text_sensor.new_text_sensor(dev["tx_block_reason"])))

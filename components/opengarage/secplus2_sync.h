@@ -15,24 +15,36 @@ class Secplus2QuerySession {
   enum class State { STOPPED, SEEKING, OBSERVED, TIMED_OUT, WRITE_FAILED };
   static constexpr uint32_t ROLLING_MASK = 0x0FFFFFFF;
   static constexpr uint16_t GET_STATUS = 0x080, GET_OPENINGS = 0x48B;
+  static constexpr uint32_t SEEK_MS = 30000, FIRST_RETRY_MS = 30000, MAX_RETRY_MS = 300000;
   void start(uint32_t client, uint32_t now) {
     if (state_ != State::STOPPED || !client) return;
     client_ = client;
     rolling_ = 0; // Explicit stock_zero_on_boot experiment, no flash writes.
-    state_ = State::SEEKING;
-    started_ms_ = last_attempt_ms_ = now;
+    next_retry_ms_ = FIRST_RETRY_MS;
+    begin_seeking_(now);
   }
   void tick(uint32_t now, const Secplus2Receiver &rx) {
+    // Timeout is a paced wait, not a latched fault. Incoming frames never bypass
+    // this delay. Each retry needs new observations after its own query writes.
+    if (state_ == State::TIMED_OUT) {
+      if (uint32_t(now - retry_started_ms_) >= retry_wait_ms_) begin_seeking_(now);
+      return;
+    }
     if (state_ != State::SEEKING && state_ != State::OBSERVED) return;
     if (status_sent_ && rx.valid() && rx.stats().status_frames != status_baseline_) status_seen_ = true;
     if (openings_sent_ && rx.openings().has_value() && rx.openings_frames() != openings_baseline_) openings_seen_ = true;
     if (state_ == State::OBSERVED && !rx.status_link_fresh()) {
-      state_ = State::SEEKING; started_ms_ = now;
-      status_seen_ = openings_seen_ = status_sent_ = openings_sent_ = false;
-      next_openings_ = false;
+      begin_seeking_(now);
     }
-    if (status_seen_ && openings_seen_ && rx.valid()) state_ = State::OBSERVED;
-    else if (state_ == State::SEEKING && uint32_t(now - started_ms_) >= 30000) state_ = State::TIMED_OUT;
+    if (status_seen_ && openings_seen_ && rx.valid()) {
+      state_ = State::OBSERVED;
+      next_retry_ms_ = FIRST_RETRY_MS;
+    } else if (state_ == State::SEEKING && uint32_t(now - started_ms_) >= SEEK_MS) {
+      state_ = State::TIMED_OUT;
+      retry_started_ms_ = now;
+      retry_wait_ms_ = next_retry_ms_;
+      next_retry_ms_ = std::min(next_retry_ms_ * 2, MAX_RETRY_MS);
+    }
   }
   std::optional<uint16_t> due(uint32_t now) const {
     if (state_ != State::SEEKING && state_ != State::OBSERVED) return {};
@@ -91,12 +103,20 @@ class Secplus2QuerySession {
     switch (state_) {
       case State::SEEKING: return "Querying status/openings";
       case State::OBSERVED: return "Responses observed (not TX acknowledgement)";
-      case State::TIMED_OUT: return "Sync timed out; reboot to retry";
+      case State::TIMED_OUT: return "No response; waiting to retry";
       case State::WRITE_FAILED: return "TX failed; reboot required";
       default: return "Queries stopped";
     }
   }
  protected:
+  void begin_seeking_(uint32_t now) {
+    state_ = State::SEEKING;
+    started_ms_ = last_attempt_ms_ = now;
+    status_seen_ = openings_seen_ = status_sent_ = openings_sent_ = false;
+    status_baseline_ = openings_baseline_ = 0;
+    next_openings_ = false;
+    // Deliberately preserve client_, rolling_, and the current backoff.
+  }
 #ifdef USE_OPENGARAGE_SECPLUS2_CONTROL
   bool encode_control_(uint16_t command, uint32_t payload, uint8_t *packet) const {
     if (!client_) return false;
@@ -107,6 +127,7 @@ class Secplus2QuerySession {
   State state_{State::STOPPED};
   uint32_t client_{0}, rolling_{0}, started_ms_{0}, last_attempt_ms_{0};
   uint32_t status_baseline_{0}, openings_baseline_{0};
+  uint32_t retry_started_ms_{0}, retry_wait_ms_{0}, next_retry_ms_{FIRST_RETRY_MS};
   bool next_openings_{false}, status_sent_{false}, openings_sent_{false};
   bool status_seen_{false}, openings_seen_{false};
 };

@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <optional>
+#include "secplus1_trace.h"
+#include "secplus1_gap.h"
 
 namespace esphome::opengarage {
 
@@ -38,7 +40,7 @@ class Secplus1Receiver {
   void set_status_timeout(uint32_t ms) { timeout_ms_ = ms; }
   void tick(uint32_t now) {
     if (request_ && uint32_t(now - last_byte_ms_) >= PARTIAL_TIMEOUT_MS) {
-      request_ = 0; inc_(stats_.partial_timeouts);
+      request_ = 0; gap_.reset(); inc_(stats_.partial_timeouts);
     }
     if (door_seen_ && uint32_t(now - door_ms_) >= timeout_ms_) clear_door_();
     if (light_seen_ && uint32_t(now - light_ms_) >= timeout_ms_) clear_light_();
@@ -47,13 +49,16 @@ class Secplus1Receiver {
     if (light_count_ && uint32_t(now - light_candidate_ms_) >= timeout_ms_) light_count_ = 0;
   }
   void feed(uint8_t byte, bool parity_bit, uint32_t now) {
-    // Fixed-size main-loop history, including rejected bytes. Never log in ISR.
+    sec1_trace('R', now * 1000U, byte, parity_bit == secplus1_even_parity(byte) ? 1 : 0);
+#ifdef USE_OPENGARAGE_SECPLUS1_RAW_TRACE
+    // Development-only history, including rejected bytes. Never log in ISR.
     trace_[trace_next_] = {now, byte, parity_bit};
     trace_next_ = (trace_next_ + 1) % trace_.size();
     if (trace_count_ < trace_.size()) ++trace_count_;
+#endif
     tick(now); last_byte_ms_ = now; inc_(stats_.bytes);
     if (parity_bit != secplus1_even_parity(byte)) {
-      request_ = 0; door_count_ = light_count_ = 0; inc_(stats_.parity_errors); return;
+      request_ = 0; gap_.reset(); door_count_ = light_count_ = 0; inc_(stats_.parity_errors); return;
     }
     if (request_) {
       const uint8_t request = request_;
@@ -61,14 +66,14 @@ class Secplus1Receiver {
       // A command cannot be the expected status payload. Recover at this byte;
       // notably 0x31 is a panel/button release, not an Opening report.
       if (byte >= 0x30 && byte <= 0x3A) {
-        inc_(stats_.invalid_frames); door_count_ = light_count_ = 0;
+        gap_.reset(); inc_(stats_.invalid_frames); door_count_ = light_count_ = 0;
         start_request_(byte); return;
       }
       last_frame_ = (uint16_t(request) << 8) | byte;
       inc_(stats_.frames);
       if (request == 0x38) {
         const DoorState value = decode_door_(byte & 7);
-        if (value == DoorState::UNKNOWN) { inc_(stats_.invalid_frames); clear_door_(); return; }
+        if (value == DoorState::UNKNOWN) { gap_.reset(); inc_(stats_.invalid_frames); clear_door_(); return; }
         inc_(stats_.door_frames); observed_status_ = true;
         if (value != door_candidate_) { door_candidate_ = value; door_count_ = 0; }
         door_candidate_ms_ = now;
@@ -76,7 +81,7 @@ class Secplus1Receiver {
         if (door_count_ == 2) { door_ = value; door_seen_ = true; door_ms_ = now; }
       } else if (request == 0x3A) {
         // Stock OpenGarage requires upper nibble 5 for this response.
-        if ((byte & 0xF0) != 0x50) { inc_(stats_.invalid_frames); clear_light_(); return; }
+        if ((byte & 0xF0) != 0x50) { gap_.reset(); inc_(stats_.invalid_frames); clear_light_(); return; }
         inc_(stats_.light_lock_frames); observed_status_ = true;
         const uint8_t value = byte & 0x0C;
         if (value != light_candidate_) { light_candidate_ = value; light_count_ = 0; }
@@ -92,11 +97,14 @@ class Secplus1Receiver {
         obstruction_ = byte != 0;
         obstruction_ms_ = now;
       }
+      gap_.exchange(query_ms_, now);
       return;
     }
     start_request_(byte);
   }
-  void transport_loss() { request_ = 0; clear_door_(); clear_light_(); obstruction_.reset(); }
+  void transport_loss() {
+    request_ = 0; gap_.reset(); clear_door_(); clear_light_(); obstruction_.reset();
+  }
   void note_activity(uint32_t now) { last_byte_ms_ = now; }
   void note_overflow() { inc_(stats_.overflows); transport_loss(); }
   void note_depth(size_t bytes) { stats_.high_water = std::max(stats_.high_water, uint16_t(std::min<size_t>(bytes, UINT16_MAX))); }
@@ -114,6 +122,7 @@ class Secplus1Receiver {
   void format_trace(char *out, size_t capacity) const {
     if (!capacity) return;
     out[0] = '\0';
+#ifdef USE_OPENGARAGE_SECPLUS1_RAW_TRACE
     size_t used = 0;
     for (size_t n = 0; n < trace_count_; ++n) {
       const auto &sample = trace_[(trace_next_ + trace_.size() - trace_count_ + n) % trace_.size()];
@@ -123,6 +132,7 @@ class Secplus1Receiver {
       if (length < 0 || size_t(length) >= capacity - used) return;
       used += size_t(length);
     }
+#endif
   }
   bool valid() const { return door_seen_; }
   DoorState door() const { return door_; }
@@ -130,6 +140,8 @@ class Secplus1Receiver {
   std::optional<bool> locked() const { return locked_; }
   std::optional<bool> obstructed() const { return obstruction_; }
   bool partial() const { return request_ != 0; }
+  bool gap_ready(uint32_t now) const { return gap_.ready(now); }
+  void reset_gap() { gap_.reset(); }
   bool observed_status() const { return observed_status_; }
   bool panel37_seen() const { return stats_.panel37 != 0; }
   uint32_t last_byte_ms() const { return last_byte_ms_; }
@@ -149,12 +161,14 @@ class Secplus1Receiver {
     }
   }
   void start_request_(uint8_t byte) {
-    if (byte == 0x38 || byte == 0x39 || byte == 0x3A) request_ = byte;
-    else { inc_(stats_.ignored_bytes); if (byte == 0x37) inc_(stats_.panel37); }
+    if (byte == 0x38 || byte == 0x39 || byte == 0x3A) { request_ = byte; query_ms_ = last_byte_ms_; }
+    else { gap_.reset(); inc_(stats_.ignored_bytes); if (byte == 0x37) inc_(stats_.panel37); }
   }
   void clear_door_() { door_seen_ = false; door_count_ = 0; door_ = DoorState::UNKNOWN; }
   void clear_light_() { light_seen_ = false; light_count_ = 0; light_.reset(); locked_.reset(); }
   uint8_t request_{0}, door_count_{0}, light_count_{0}, light_candidate_{0};
+  Secplus1Gap gap_;
+  uint32_t query_ms_{0};
   DoorState door_{DoorState::UNKNOWN}, door_candidate_{DoorState::UNKNOWN};
   std::optional<bool> light_, locked_, obstruction_;
   std::optional<uint16_t> last_frame_;
@@ -163,9 +177,11 @@ class Secplus1Receiver {
   uint32_t timeout_ms_{10000};
   bool door_seen_{false}, light_seen_{false}, observed_status_{false};
   Secplus1Stats stats_;
+#ifdef USE_OPENGARAGE_SECPLUS1_RAW_TRACE
   struct RawSample { uint32_t ms; uint8_t byte; bool parity; };
   std::array<RawSample, 8> trace_{};
   size_t trace_next_{0}, trace_count_{0};
+#endif
 };
 
 enum class Secplus1PanelState : uint8_t { NOT_STARTED, PASSIVE, WAITING, EXISTING_PANEL, EMULATING, UNSUPPORTED_PANEL, TX_FAULT, STOPPED, WAITING_NO_EMULATION };

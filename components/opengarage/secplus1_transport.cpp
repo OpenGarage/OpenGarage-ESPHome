@@ -35,6 +35,7 @@ void Secplus1Transport::loop(uint32_t now) {
   if (releases_left_) { service_release_(now, backlog); return; }
   if (control_fault_) return;
 #endif
+  sec1_trace_flush(now);  // Never emit log output while a button release is pending.
   const auto next = panel_.due(now);
   if (!next) return;
   // Wait for idle: drain before sending, avoid partial responses and a physically
@@ -53,6 +54,7 @@ void Secplus1Transport::loop(uint32_t now) {
   // One 1200/8E1 byte is ~9.2 ms. SoftwareSerial keeps interrupts enabled by
   // default; never loop over a complete initialization sequence in one service.
   const bool ok = uart_.write(*next) == 1;
+  sec1_trace(ok ? 'P' : 'F', start, *next, uint16_t(std::min<uint32_t>(micros() - start, 65535)));
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
   last_tx_ms_ = now; tx_seen_ = true;
 #endif
@@ -71,7 +73,16 @@ void Secplus1Transport::stop() {
   receiver_.transport_loss();
 }
 #ifdef USE_OPENGARAGE_SECPLUS1_CONTROL
-bool Secplus1Transport::command_idle(uint32_t now) const {
+bool Secplus1Transport::write_button_(uint8_t byte) {
+  // Keep SoftwareSerial's default enabled interrupts, as in the tested gap build.
+  return uart_.write(byte) == 1;
+}
+bool Secplus1Transport::command_idle(uint32_t now) {
+  if (panel_.state() == Secplus1PanelState::EXISTING_PANEL)
+    return controls_available() && !releases_left_ && !receiver_.partial() &&
+        (!tx_seen_ || uint32_t(now - last_tx_ms_) >= 50) &&
+        uint32_t(now - receiver_.last_byte_ms()) >= 10 &&
+        !rx_->digital_read() && receiver_.gap_ready(now);
   return controls_available() && !releases_left_ && !receiver_.partial() &&
       (!tx_seen_ || uint32_t(now - last_tx_ms_) >= 50) &&
       uint32_t(now - receiver_.last_byte_ms()) >= 50 && !rx_->digital_read();
@@ -119,11 +130,17 @@ bool Secplus1Transport::press_(uint8_t press, uint8_t release, uint32_t now,
   releases_left_ = 2;
   pressed_ms_ = release_ms_ = now;
   expedited_release_ = false;
+#ifdef OG_SEC1_TRACE
+  trace_release_deferred_ = false;
+#endif
   // Independent electrical force-LOW only; never write UART/tone/network in a timer.
   // A protocol release still requires main-loop service or lifecycle teardown.
   force_low_.once_ms(1000, [this]() { tx_->digital_write(false); });
   const auto begin = micros();
-  const bool ok = uart_.write(press) == 1;
+  if (panel_.state() == Secplus1PanelState::EXISTING_PANEL) sec1_trace('G', begin, press, 160);
+  receiver_.reset_gap(); // A transmitted press consumes the prediction; never replay it.
+  const bool ok = write_button_(press);
+  sec1_trace(ok ? 'T' : 'F', begin, press, uint16_t(std::min<uint32_t>(micros() - begin, 65535)));
   last_tx_ms_ = now; tx_seen_ = true;
   receiver_.note_tx(ok);
   receiver_.note_service(uint32_t(micros() - begin));
@@ -133,15 +150,31 @@ bool Secplus1Transport::press_(uint8_t press, uint8_t release, uint32_t now,
 }
 void Secplus1Transport::service_release_(uint32_t now, bool backlog) {
   const bool overdue = uint32_t(now - pressed_ms_) >= 1000;
-  const uint32_t delay_ms = releases_left_ == 2 ? 250 : 40;
+  // Match the tested gap-aware transaction: two releases, 40 ms apart.
+  const uint32_t delay_ms = 40;
   if (!overdue && !(expedited_release_ && releases_left_ == 2) &&
       uint32_t(now - release_ms_) < delay_ms) return;
   // Best-effort idle avoidance. At the deadline prioritize releasing a button
   // already pressed; do not hold it forever waiting for a quiet bus.
-  if (!overdue && (backlog || receiver_.partial() ||
-      uint32_t(now - receiver_.last_byte_ms()) < 50 || rx_->digital_read())) return;
+  // Match stock's available()==0 release scheduling. Our bounded
+  // RX pump still runs first; do not send over bytes left behind by that pump.
+  // This does not establish electrical bus ownership or collision-free delivery.
+  const uint16_t release_block = (backlog || uart_.available() > 0) ? SEC1_BACKLOG : 0;
+  if (!overdue && release_block) {
+#ifdef OG_SEC1_TRACE
+    if (!trace_release_deferred_) {
+      sec1_trace('D', micros(), release_byte_, release_block);
+      trace_release_deferred_ = true;
+    }
+#endif
+    return;
+  }
   const auto begin = micros();
-  const bool ok = uart_.write(release_byte_) == 1;
+  const bool ok = write_button_(release_byte_);
+  sec1_trace(ok ? 'T' : 'F', begin, release_byte_, uint16_t(std::min<uint32_t>(micros() - begin, 65535)));
+#ifdef OG_SEC1_TRACE
+  trace_release_deferred_ = false;
+#endif
   last_tx_ms_ = now; tx_seen_ = true;
   receiver_.note_tx(ok);
   receiver_.note_service(uint32_t(micros() - begin));
@@ -152,9 +185,9 @@ void Secplus1Transport::service_release_(uint32_t now, bool backlog) {
 void Secplus1Transport::emergency_release_() {
   if (started_ && tx_ && releases_left_) {
     // Shutdown/OTA may not service another loop. Two bounded release-only
-    // writes (~18.4 ms total) replace normal 250/40 ms scheduling here.
-    receiver_.note_tx(uart_.write(release_byte_) == 1);
-    receiver_.note_tx(uart_.write(release_byte_) == 1);
+    // writes (~18.4 ms total) replace normal 40/40 ms scheduling here.
+    receiver_.note_tx(write_button_(release_byte_));
+    receiver_.note_tx(write_button_(release_byte_));
   }
   releases_left_ = 0;
   force_low_.detach();
