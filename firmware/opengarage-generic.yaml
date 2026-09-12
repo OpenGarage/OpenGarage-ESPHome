@@ -9,7 +9,7 @@ packages:
 esphome:
   name_add_mac_suffix: true
   project:
-    version: 0.10.25-dev-generic
+    version: 0.10.26-experimental
 wifi:
   reboot_timeout: 0s
   ap: {}

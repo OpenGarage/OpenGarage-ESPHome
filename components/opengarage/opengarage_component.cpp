@@ -217,7 +217,7 @@ void OpenGarageComponent::publish_(uint32_t now) {
   publish_binary(secplus1_binary_[1], receiver.light());
   publish_binary(secplus1_binary_[2], receiver.locked());
   publish_binary(secplus1_binary_[3], receiver.obstructed());
-  publish_text(secplus1_panel_text_, secplus1_panel_name(secplus1_.panel_state()));
+  publish_text(secplus1_panel_text_, secplus1_.panel_status(now));
   publish_binary(secplus1_rx_level_, secplus1_.rx_high());
   if (secplus1_trace_text_) {
     char trace[160]; receiver.format_trace(trace, sizeof(trace));

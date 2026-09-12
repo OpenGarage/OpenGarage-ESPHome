@@ -141,6 +141,7 @@ class Secplus1Receiver {
   std::optional<bool> obstructed() const { return obstruction_; }
   bool partial() const { return request_ != 0; }
   bool gap_ready(uint32_t now) const { return gap_.ready(now); }
+  bool gap_timing_insufficient(uint32_t now) const { return gap_.timing_insufficient(now); }
   void reset_gap() { gap_.reset(); }
   bool observed_status() const { return observed_status_; }
   bool panel37_seen() const { return stats_.panel37 != 0; }

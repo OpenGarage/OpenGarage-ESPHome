@@ -15,6 +15,8 @@ Hardware detection does not automatically detect the opener's protocol. Inconsis
 
 With an existing Security+ 1.0 smart panel, light/lock commands and warned door requests may wait briefly for a suitable gap in panel traffic. If the bus remains busy, a request can expire without being sent—even after the warning sounds. A Toggle during confirmed motion does not wait: it can be refused if no suitable gap is available immediately. Transmitted toggles are not automatically retried.
 
+Some smart panels leave insufficient time for OG commands. **Sec+ 1.0 Panel Mode** displays **Panel timing insufficient for commands** when observed timing establishes this limitation. To use OG without the incompatible panel, set **Panel Emulation** to **Automatic**, power off the opener and OG before disconnecting the smart panel, then restore power and restart OG. Allow the initial listening period to finish; Panel Mode should change to **Emulating wall panel**. Keep the opener's safety devices connected.
+
 ## Door Actions
 
 If a Security+ 2.0 opener stops responding, OG retries status queries automatically. The **Sec+ 2.0 Session** diagnostic shows **No response; waiting to retry** between attempts. Waits increase from 30 seconds to a five-minute cap; controls remain unavailable until responses are observed again. Pending actions are not replayed. A **TX failed; reboot required** message is a separate fault and still requires a restart.

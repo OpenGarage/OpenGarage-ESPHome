@@ -18,6 +18,11 @@ class Secplus1Transport {
   bool started() const { return started_; }
   Secplus1Receiver &receiver() { return receiver_; }
   Secplus1PanelState panel_state() const { return panel_.state(); }
+  const char *panel_status(uint32_t now) const {
+    if (panel_.state() == Secplus1PanelState::EXISTING_PANEL && receiver_.gap_timing_insufficient(now))
+      return "Panel timing insufficient for commands";
+    return secplus1_panel_name(panel_.state());
+  }
   std::optional<bool> rx_high() const { return started_ ? std::optional<bool>(rx_high_) : std::nullopt; }
   uint8_t last_block_mask() const { return last_block_mask_; }
   // Last due-attempt result, or explicit no-attempt/inactive state; not a live interlock API.

@@ -2,7 +2,7 @@
 
 ESPHome-based firmware for OpenGarage (OG) with local Home Assistant (HA) integration. Supports **OpenGarage v2.0–v2.2 and v2.3+ boards with 4 MB flash**. Older 2 MB boards are not supported.
 
-**Experimental, not yet publicly released.** This firmware is intended for user testing. Basic operation has been manually tested, but broad opener compatibility and long-term reliability have not been established. Read the [known issues and safety limits](docs/known-issues.md).
+**Experimental firmware for user testing.** Basic operation has been manually tested, but broad opener compatibility and long-term reliability have not been established. Read the [known issues and safety limits](docs/known-issues.md).
 
 ## Start Here
 

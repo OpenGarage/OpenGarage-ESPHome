@@ -28,6 +28,13 @@ class Secplus1Gap {
     return seen_ && count_>=3 && reply_age>=10 && reply_age<=45 &&
         age<minimum_ && minimum_-age>=160;
   }
+  // Diagnostic only: distinguish an impossible window from one the loop missed.
+  // At the earliest allowed start (reply + 10), 160 ms must still remain.
+  // Do not blame panel timing after observations have gone stale.
+  bool timing_insufficient(uint32_t now) const {
+    return seen_ && count_>=3 && uint32_t(now-reply_)<=400 &&
+        minimum_ < 170U + uint32_t(reply_-query_);
+  }
  private:
   uint32_t query_{0}, reply_{0}, minimum_{0}, maximum_{0};
   uint8_t count_{0};
